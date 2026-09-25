@@ -36,6 +36,12 @@ type stackResponse struct {
 	LastSHA      string     `json:"last_sha"`
 	LastDeployAt *time.Time `json:"last_deploy_at"`
 	LastError    string     `json:"last_error"`
+	// Source is "git" or "inline" (compose file edited in the UI).
+	Source         string `json:"source"`
+	ComposeContent string `json:"compose_content"`
+	// ContentSHA identifies the current inline compose file; it equals LastSHA
+	// when that revision is deployed ("" for git stacks).
+	ContentSHA string `json:"content_sha"`
 	// DeployTrigger is "push" or "workflow" (deploy after GitHub Actions succeeded).
 	DeployTrigger string `json:"deploy_trigger"`
 	WorkflowName  string `json:"workflow_name"`
@@ -83,26 +89,52 @@ func (s *Server) toStackResponse(st *db.Stack) stackResponse {
 		s.log.Error("decrypt env", "stack", st.Name, "err", err)
 	}
 	return stackResponse{
-		ID:            st.ID,
-		Name:          st.Name,
-		RepoURL:       st.RepoURL,
-		Branch:        st.Branch,
-		ComposePath:   st.ComposePath,
-		AutoDeploy:    st.AutoDeploy,
-		HasToken:      st.TokenEnc != "",
-		EnvKeys:       keys,
-		WebhookURL:    "/api/hooks/github/" + strconv.FormatInt(st.ID, 10),
-		Status:        st.Status,
-		LastSHA:       st.LastSHA,
-		LastDeployAt:  st.LastDeployAt,
-		LastError:     st.LastError,
-		DeployTrigger: st.DeployTrigger,
-		WorkflowName:  st.WorkflowName,
-		WaitingSHA:    st.WaitingSHA,
-		WaitingReason: st.WaitingReason,
-		CreatedAt:     st.CreatedAt,
-		UpdatedAt:     st.UpdatedAt,
+		ID:             st.ID,
+		Name:           st.Name,
+		RepoURL:        st.RepoURL,
+		Branch:         st.Branch,
+		ComposePath:    st.ComposePath,
+		AutoDeploy:     st.AutoDeploy,
+		HasToken:       st.TokenEnc != "",
+		EnvKeys:        keys,
+		WebhookURL:     "/api/hooks/github/" + strconv.FormatInt(st.ID, 10),
+		Status:         st.Status,
+		LastSHA:        st.LastSHA,
+		LastDeployAt:   st.LastDeployAt,
+		LastError:      st.LastError,
+		Source:         st.Source,
+		ComposeContent: st.ComposeContent,
+		ContentSHA:     contentSHA(st),
+		DeployTrigger:  st.DeployTrigger,
+		WorkflowName:   st.WorkflowName,
+		WaitingSHA:     st.WaitingSHA,
+		WaitingReason:  st.WaitingReason,
+		CreatedAt:      st.CreatedAt,
+		UpdatedAt:      st.UpdatedAt,
 	}
+}
+
+func contentSHA(st *db.Stack) string {
+	if st.Source != db.SourceInline {
+		return ""
+	}
+	return deployer.ContentSHA(st.ComposeContent)
+}
+
+// maxComposeSize bounds inline compose files (the JSON body limit is 1 MiB).
+const maxComposeSize = 256 << 10
+
+func validateComposeContent(c string) error {
+	if strings.TrimSpace(c) == "" {
+		return errors.New("compose_content is required")
+	}
+	if len(c) > maxComposeSize {
+		return errors.New("compose_content is too large (max 256 KiB)")
+	}
+	if strings.ContainsRune(c, 0) {
+		return errors.New("compose_content must be text")
+	}
+	return nil
 }
 
 func newWebhookSecret() (string, error) {
@@ -166,10 +198,21 @@ type createStackRequest struct {
 	// DeployTrigger: "push" (default) or "workflow".
 	DeployTrigger string `json:"deploy_trigger"`
 	WorkflowName  string `json:"workflow_name"`
+	// Source: "git" (default) or "inline"; inline stacks need ComposeContent
+	// and ignore the repository fields.
+	Source         string `json:"source"`
+	ComposeContent string `json:"compose_content"`
 }
 
 // validateTrigger checks the deploy trigger settings of st (after defaults/trimming).
 func validateTrigger(st *db.Stack) error {
+	if st.Source == db.SourceInline {
+		if st.DeployTrigger != db.TriggerPush {
+			return errors.New("inline stacks deploy when saved; deploy_trigger must be \"push\"")
+		}
+		st.WorkflowName = ""
+		return nil
+	}
 	switch st.DeployTrigger {
 	case db.TriggerPush:
 		st.WorkflowName = ""
@@ -197,7 +240,27 @@ func (s *Server) createStack(w http.ResponseWriter, r *http.Request) {
 	req.Branch = strings.TrimSpace(req.Branch)
 	req.ComposePath = strings.TrimSpace(req.ComposePath)
 	req.Token = strings.TrimSpace(req.Token)
-	if req.Branch == "" {
+	req.Source = strings.TrimSpace(req.Source)
+	switch req.Source {
+	case "":
+		req.Source = db.SourceGit
+	case db.SourceGit, db.SourceInline:
+	default:
+		httpx.WriteError(w, http.StatusBadRequest, `source must be "git" or "inline"`)
+		return
+	}
+	if req.Source == db.SourceInline {
+		if err := validateComposeContent(req.ComposeContent); err != nil {
+			httpx.WriteError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		// Repository settings don't apply; keep the row consistent.
+		req.RepoURL, req.Branch, req.Token, req.DeployTrigger = "", "", "", db.TriggerPush
+		req.ComposePath = deployer.InlineFile
+	} else {
+		req.ComposeContent = ""
+	}
+	if req.Branch == "" && req.Source == db.SourceGit {
 		req.Branch = "main"
 	}
 	if req.ComposePath == "" {
@@ -207,18 +270,21 @@ func (s *Server) createStack(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if err := validate.RepoURL(req.RepoURL); err != nil {
-		httpx.WriteError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	if err := validate.Branch(req.Branch); err != nil {
-		httpx.WriteError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	cp, err := validate.ComposePath(req.ComposePath)
-	if err != nil {
-		httpx.WriteError(w, http.StatusBadRequest, err.Error())
-		return
+	cp := req.ComposePath
+	if req.Source == db.SourceGit {
+		if err := validate.RepoURL(req.RepoURL); err != nil {
+			httpx.WriteError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if err := validate.Branch(req.Branch); err != nil {
+			httpx.WriteError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		var err error
+		if cp, err = validate.ComposePath(req.ComposePath); err != nil {
+			httpx.WriteError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 	}
 	if err := validate.Env(req.Env); err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
@@ -235,7 +301,8 @@ func (s *Server) createStack(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	st := &db.Stack{Name: req.Name, RepoURL: req.RepoURL, Branch: req.Branch, ComposePath: cp, AutoDeploy: auto,
-		DeployTrigger: strings.TrimSpace(req.DeployTrigger), WorkflowName: strings.TrimSpace(req.WorkflowName)}
+		DeployTrigger: strings.TrimSpace(req.DeployTrigger), WorkflowName: strings.TrimSpace(req.WorkflowName),
+		Source: req.Source, ComposeContent: req.ComposeContent}
 	if st.DeployTrigger == "" {
 		st.DeployTrigger = db.TriggerPush
 	}
@@ -263,7 +330,10 @@ func (s *Server) createStack(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, err)
 		return
 	}
-	s.log.Info("stack created", "stack", st.Name, "id", st.ID)
+	s.log.Info("stack created", "stack", st.Name, "id", st.ID, "source", st.Source)
+	if st.Source == db.SourceInline && st.AutoDeploy {
+		s.dep.Enqueue(st.ID, false) // nothing to poll: deploy right away
+	}
 	httpx.WriteJSON(w, http.StatusCreated, map[string]any{
 		"stack":          s.toStackResponse(st),
 		"webhook_secret": secret,
@@ -288,6 +358,8 @@ type updateStackRequest struct {
 	Env           map[string]*string `json:"env"`
 	DeployTrigger *string            `json:"deploy_trigger"`
 	WorkflowName  *string            `json:"workflow_name"`
+	// ComposeContent replaces an inline stack's compose file.
+	ComposeContent *string `json:"compose_content"`
 }
 
 func (s *Server) updateStack(w http.ResponseWriter, r *http.Request) {
@@ -299,6 +371,24 @@ func (s *Server) updateStack(w http.ResponseWriter, r *http.Request) {
 	if err := httpx.DecodeJSON(w, r, &req); err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
+	}
+	inline := st.Source == db.SourceInline
+	if inline && (req.RepoURL != nil || req.Branch != nil || req.ComposePath != nil || req.Token != nil || req.ClearToken) {
+		httpx.WriteError(w, http.StatusBadRequest, "inline stacks have no repository settings")
+		return
+	}
+	if !inline && req.ComposeContent != nil {
+		httpx.WriteError(w, http.StatusBadRequest, "compose_content only applies to inline stacks")
+		return
+	}
+	contentChanged := false
+	if req.ComposeContent != nil {
+		if err := validateComposeContent(*req.ComposeContent); err != nil {
+			httpx.WriteError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		contentChanged = *req.ComposeContent != st.ComposeContent
+		st.ComposeContent = *req.ComposeContent
 	}
 	if req.RepoURL != nil {
 		v := strings.TrimSpace(*req.RepoURL)
@@ -385,7 +475,68 @@ func (s *Server) updateStack(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, err)
 		return
 	}
+	// Inline stacks have nothing to poll: saving a changed file is the trigger.
+	if contentChanged && st.AutoDeploy && st.Status != db.StatusStopped {
+		s.log.Info("inline compose file changed, deploy queued", "stack", st.Name)
+		s.dep.Enqueue(st.ID, false)
+	}
 	httpx.WriteJSON(w, http.StatusOK, s.toStackResponse(st))
+}
+
+type validateComposeRequest struct {
+	Content string `json:"content"`
+	// StackID (optional) supplies the stack's stored env vars for interpolation.
+	StackID int64 `json:"stack_id"`
+	// Env (optional) overrides env vars like PUT /stacks/{id}: it replaces the
+	// set of keys, a null value keeps the stored one.
+	Env map[string]*string `json:"env"`
+}
+
+// validateCompose checks a draft compose file with `docker compose config`.
+func (s *Server) validateCompose(w http.ResponseWriter, r *http.Request) {
+	var req validateComposeRequest
+	if err := httpx.DecodeJSON(w, r, &req); err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := validateComposeContent(req.Content); err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	stored := map[string]string{}
+	if req.StackID > 0 {
+		st, err := s.db.GetStack(r.Context(), req.StackID)
+		if errors.Is(err, db.ErrNotFound) {
+			httpx.WriteError(w, http.StatusNotFound, "stack not found")
+			return
+		}
+		if err != nil {
+			s.internalError(w, err)
+			return
+		}
+		if stored, err = s.decryptEnv(st.EnvEnc); err != nil {
+			s.internalError(w, err)
+			return
+		}
+	}
+	env := stored
+	if req.Env != nil {
+		env = map[string]string{}
+		for k, v := range req.Env {
+			if validate.EnvKey(k) != nil {
+				continue
+			}
+			if v == nil {
+				if ov, ok := stored[k]; ok {
+					env[k] = ov
+				}
+			} else if validate.EnvValue(k, *v) == nil {
+				env[k] = *v
+			}
+		}
+	}
+	out, err := s.dep.ValidateCompose(r.Context(), req.Content, env)
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"valid": err == nil, "output": out})
 }
 
 func (s *Server) deleteStack(w http.ResponseWriter, r *http.Request) {

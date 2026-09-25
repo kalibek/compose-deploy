@@ -29,6 +29,7 @@ type Deployer interface {
 	EnqueueSHA(id int64, sha string)
 	Stop(id int64)
 	Down(ctx context.Context, st *db.Stack) error
+	ValidateCompose(ctx context.Context, content string, env map[string]string) (string, error)
 }
 
 // WorkflowChecker reports the GitHub Actions state of a commit.
@@ -119,6 +120,7 @@ func (s *Server) Handler() http.Handler {
 			r.Post("/stacks/{id}/stop", s.stopStack)
 			r.Get("/stacks/{id}/status", s.stackStatus)
 			r.Post("/stacks/{id}/webhook-secret", s.rotateWebhookSecret)
+			r.Post("/compose/validate", s.validateCompose)
 			r.Get("/stacks/{id}/containers", s.listContainers)
 			r.Get("/stacks/{id}/containers/{cid}/logs", s.containerLogs)
 			r.Get("/stacks/{id}/containers/{cid}/exec", s.containerExec)

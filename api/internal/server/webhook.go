@@ -78,6 +78,10 @@ func (s *Server) githubWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if st.Source == db.SourceInline {
+		ignored(w, "inline stack: deploys when its compose file is saved")
+		return
+	}
 	switch r.Header.Get("X-GitHub-Event") {
 	case "ping":
 		httpx.WriteJSON(w, http.StatusOK, map[string]string{"status": "pong"})

@@ -1,12 +1,22 @@
-import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
+import { lazy, Suspense, useEffect, useState, type FormEvent, type ReactNode } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
 import { api, errorMessage } from '../api/client'
-import type { CreateStackResponse, DeployTrigger, Stack, UpdateStackRequest } from '../api/types'
+import type {
+  CreateStackResponse,
+  DeployTrigger,
+  Stack,
+  StackSource,
+  UpdateStackRequest,
+  ValidateComposeResponse,
+} from '../api/types'
 import KeyValueEditor from '../components/KeyValueEditor'
 import WebhookSetup from '../components/WebhookSetup'
 import { envForCreate, envForUpdate, rowsFromKeys, validateEnv, type EnvRow } from '../lib/env'
 import { SLUG_RE } from '../lib/format'
-import { btnPrimary, btnSecondary, card, code, errorBox, hint, input, label, link } from '../lib/ui'
+import { btnPrimary, btnSecondary, btnSecondarySm, card, code, errorBox, hint, input, label, link } from '../lib/ui'
+
+// CodeMirror is sizeable; load it only for inline stacks.
+const ComposeEditor = lazy(() => import('../components/ComposeEditor'))
 
 interface Props {
   mode: 'create' | 'edit'
@@ -14,6 +24,8 @@ interface Props {
 
 interface FormState {
   name: string
+  source: StackSource
+  compose_content: string
   repo_url: string
   branch: string
   compose_path: string
@@ -25,8 +37,18 @@ interface FormState {
   env: EnvRow[]
 }
 
+const composeTemplate = `services:
+  web:
+    image: nginx:alpine
+    ports:
+      - "8080:80"
+    restart: unless-stopped
+`
+
 const emptyForm: FormState = {
   name: '',
+  source: 'git',
+  compose_content: composeTemplate,
   repo_url: '',
   branch: 'main',
   compose_path: 'docker-compose.yml',
@@ -41,6 +63,8 @@ const emptyForm: FormState = {
 function formFromStack(s: Stack): FormState {
   return {
     name: s.name,
+    source: s.source,
+    compose_content: s.compose_content,
     repo_url: s.repo_url,
     branch: s.branch,
     compose_path: s.compose_path,
@@ -57,6 +81,10 @@ function validate(f: FormState, mode: Props['mode']): string | null {
   if (mode === 'create' && !SLUG_RE.test(f.name)) {
     return 'Name must be lowercase letters, digits and dashes, starting with a letter or digit (max 63 chars)'
   }
+  if (f.source === 'inline') {
+    if (!f.compose_content.trim()) return 'The compose file is empty'
+    return validateEnv(f.env)
+  }
   if (!/^https:\/\/\S+$/.test(f.repo_url.trim())) return 'Repository URL must start with https://'
   if (f.deploy_trigger === 'workflow' && !/^https:\/\/github\.com\/[^/\s]+\/[^/\s]+\/?$/i.test(f.repo_url.trim())) {
     return 'Deploying after a workflow requires a https://github.com/<owner>/<repo> repository'
@@ -68,10 +96,13 @@ function validate(f: FormState, mode: Props['mode']): string | null {
   return validateEnv(f.env)
 }
 
-function Section({ title, children }: { title: string; children: ReactNode }) {
+function Section({ title, children, aside }: { title: string; children: ReactNode; aside?: ReactNode }) {
   return (
     <section className={card}>
-      <h2 className="mb-3 text-sm font-semibold text-zinc-800 dark:text-zinc-200">{title}</h2>
+      <div className="mb-3 flex items-center justify-between gap-2">
+        <h2 className="text-sm font-semibold text-zinc-800 dark:text-zinc-200">{title}</h2>
+        {aside}
+      </div>
       <div className="space-y-4">{children}</div>
     </section>
   )
@@ -80,16 +111,17 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
 function TokenHelp({ workflow }: { workflow: boolean }) {
   return (
     <div className="rounded-md border border-sky-200 bg-sky-50 p-3 text-xs leading-relaxed text-sky-900 dark:border-sky-900 dark:bg-sky-950/40 dark:text-sky-200">
-      Create a GitHub fine-grained personal access token (<strong>Settings → Developer settings → Fine-grained
-      tokens</strong>), Repository access: <strong>Only select repositories</strong> → this repo, Permissions:{' '}
-      <strong>Contents → Read-only</strong>
+      Create a GitHub fine-grained personal access token (
+      <strong>Settings → Developer settings → Fine-grained tokens</strong>), Repository access:{' '}
+      <strong>Only select repositories</strong> → this repo, Permissions: <strong>Contents → Read-only</strong>
       {workflow && (
         <>
           {' '}
           and <strong>Actions → Read-only</strong> (to check workflow runs)
         </>
       )}
-      . Leave empty for public repos{workflow && ' (a token still raises the GitHub API rate limit)'}.{' '}
+      . Leave empty for public repos
+      {workflow && ' (a token still raises the GitHub API rate limit)'}.{' '}
       <a
         href="https://github.com/settings/personal-access-tokens/new"
         target="_blank"
@@ -132,6 +164,36 @@ function CreatedPanel({ result }: { result: CreateStackResponse }) {
   )
 }
 
+function SourceOption({
+  checked,
+  onSelect,
+  title,
+  description,
+  disabled,
+}: {
+  checked: boolean
+  onSelect: () => void
+  title: string
+  description: string
+  disabled?: boolean
+}) {
+  return (
+    <label
+      className={`flex cursor-pointer items-start gap-2 rounded-md border p-3 text-sm ${
+        checked
+          ? 'border-zinc-900 bg-zinc-50 dark:border-zinc-300 dark:bg-zinc-800/60'
+          : 'border-zinc-200 hover:border-zinc-400 dark:border-zinc-800 dark:hover:border-zinc-600'
+      }`}
+    >
+      <input type="radio" name="source" className="mt-0.5" checked={checked} onChange={onSelect} disabled={disabled} />
+      <span>
+        <span className="font-medium">{title}</span>
+        <span className="block text-xs text-zinc-500 dark:text-zinc-400">{description}</span>
+      </span>
+    </label>
+  )
+}
+
 export default function StackForm({ mode }: Props) {
   const { id } = useParams()
   const navigate = useNavigate()
@@ -141,6 +203,8 @@ export default function StackForm({ mode }: Props) {
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [created, setCreated] = useState<CreateStackResponse | null>(null)
+  const [validation, setValidation] = useState<ValidateComposeResponse | null>(null)
+  const [validating, setValidating] = useState(false)
 
   useEffect(() => {
     if (mode !== 'edit' || !id) return
@@ -164,7 +228,30 @@ export default function StackForm({ mode }: Props) {
     setForm((f) => ({ ...f, [key]: value }))
   }
 
-  async function submit(e: FormEvent) {
+  const inline = form.source === 'inline'
+  const contentChanged = !!stack && form.compose_content !== stack.compose_content
+  // The server deploys an inline stack by itself when a changed file is saved with auto-deploy on.
+  const serverWillDeploy = inline && form.auto_deploy && contentChanged && stack?.status !== 'stopped'
+
+  async function checkCompose() {
+    setValidating(true)
+    setValidation(null)
+    try {
+      setValidation(
+        await api.validateCompose({
+          content: form.compose_content,
+          stack_id: stack?.id,
+          env: stack ? envForUpdate(form.env) : envForCreate(form.env),
+        }),
+      )
+    } catch (err) {
+      setValidation({ valid: false, output: errorMessage(err) })
+    } finally {
+      setValidating(false)
+    }
+  }
+
+  async function submit(e: FormEvent, deployAfter = false) {
     e.preventDefault()
     const v = validate(form, mode)
     if (v) {
@@ -175,6 +262,17 @@ export default function StackForm({ mode }: Props) {
     setError(null)
     try {
       if (mode === 'create') {
+        if (inline) {
+          const res = await api.createStack({
+            name: form.name.trim(),
+            source: 'inline',
+            compose_content: form.compose_content,
+            env: envForCreate(form.env),
+            auto_deploy: form.auto_deploy,
+          })
+          navigate(`/stacks/${res.stack.id}`)
+          return
+        }
         const token = form.token.trim()
         const res = await api.createStack({
           name: form.name.trim(),
@@ -189,18 +287,28 @@ export default function StackForm({ mode }: Props) {
         })
         setCreated(res)
       } else if (stack) {
-        const body: UpdateStackRequest = {
-          repo_url: form.repo_url.trim(),
-          branch: form.branch.trim() || 'main',
-          compose_path: form.compose_path.trim() || 'docker-compose.yml',
-          auto_deploy: form.auto_deploy,
-          deploy_trigger: form.deploy_trigger,
-          workflow_name: form.workflow_name.trim(),
-          env: envForUpdate(form.env),
+        let body: UpdateStackRequest
+        if (inline) {
+          body = {
+            compose_content: form.compose_content,
+            auto_deploy: form.auto_deploy,
+            env: envForUpdate(form.env),
+          }
+        } else {
+          body = {
+            repo_url: form.repo_url.trim(),
+            branch: form.branch.trim() || 'main',
+            compose_path: form.compose_path.trim() || 'docker-compose.yml',
+            auto_deploy: form.auto_deploy,
+            deploy_trigger: form.deploy_trigger,
+            workflow_name: form.workflow_name.trim(),
+            env: envForUpdate(form.env),
+          }
+          if (form.clear_token) body.clear_token = true
+          else if (form.token.trim()) body.token = form.token.trim()
         }
-        if (form.clear_token) body.clear_token = true
-        else if (form.token.trim()) body.token = form.token.trim()
         await api.updateStack(stack.id, body)
+        if (deployAfter && !serverWillDeploy) await api.deployStack(stack.id)
         navigate(`/stacks/${stack.id}`)
       }
     } catch (err) {
@@ -213,18 +321,14 @@ export default function StackForm({ mode }: Props) {
   if (created) return <CreatedPanel result={created} />
 
   if (mode === 'edit' && !stack) {
-    return loadError ? (
-      <div className={errorBox}>{loadError}</div>
-    ) : (
-      <p className="text-sm text-zinc-500">Loading…</p>
-    )
+    return loadError ? <div className={errorBox}>{loadError}</div> : <p className="text-sm text-zinc-500">Loading…</p>
   }
 
   const nameInvalid = mode === 'create' && form.name !== '' && !SLUG_RE.test(form.name)
   const backTo = stack ? `/stacks/${stack.id}` : '/stacks'
 
   return (
-    <form onSubmit={(e) => void submit(e)} className="mx-auto max-w-2xl space-y-4" noValidate>
+    <form onSubmit={(e) => void submit(e)} className="mx-auto max-w-3xl space-y-4" noValidate>
       <div className="flex items-center justify-between gap-2">
         <h1 className="text-xl font-semibold tracking-tight">
           {mode === 'create' ? 'New stack' : `Edit ${stack?.name ?? ''}`}
@@ -234,8 +338,8 @@ export default function StackForm({ mode }: Props) {
         </Link>
       </div>
 
-      <Section title="Repository">
-        {mode === 'create' && (
+      {mode === 'create' && (
+        <Section title="Stack">
           <div>
             <label htmlFor="name" className={label}>
               Name
@@ -256,97 +360,175 @@ export default function StackForm({ mode }: Props) {
               project name; cannot be changed later.
             </p>
           </div>
-        )}
-        <div>
-          <label htmlFor="repo_url" className={label}>
-            GitHub repository URL
-          </label>
-          <input
-            id="repo_url"
-            type="url"
-            className={input}
-            value={form.repo_url}
-            onChange={(e) => set('repo_url', e.target.value)}
-            placeholder="https://github.com/owner/repo"
-            autoComplete="off"
-            spellCheck={false}
-            required
-            disabled={busy}
-          />
-        </div>
-        <div className="grid gap-4 sm:grid-cols-2">
-          <div>
-            <label htmlFor="branch" className={label}>
-              Branch
-            </label>
-            <input
-              id="branch"
-              className={input}
-              value={form.branch}
-              onChange={(e) => set('branch', e.target.value)}
-              placeholder="main"
-              autoComplete="off"
-              spellCheck={false}
+          <div className="grid gap-2 sm:grid-cols-2">
+            <SourceOption
+              checked={!inline}
+              onSelect={() => set('source', 'git')}
+              title="Git repository"
+              description="Deploy a compose file from a GitHub repository and follow a branch."
+              disabled={busy}
+            />
+            <SourceOption
+              checked={inline}
+              onSelect={() => set('source', 'inline')}
+              title="Compose editor"
+              description="Write the compose file here; saving it redeploys the stack."
               disabled={busy}
             />
           </div>
-          <div>
-            <label htmlFor="compose_path" className={label}>
-              Compose file path
-            </label>
-            <input
-              id="compose_path"
-              className={`${input} font-mono`}
-              value={form.compose_path}
-              onChange={(e) => set('compose_path', e.target.value)}
-              placeholder="docker-compose.yml"
-              autoComplete="off"
-              spellCheck={false}
-              disabled={busy}
-            />
-            <p className={hint}>Relative to the repository root.</p>
-          </div>
-        </div>
-        <div>
-          <label htmlFor="token" className={label}>
-            Access token
-          </label>
-          <input
-            id="token"
-            type="password"
-            className={`${input} font-mono`}
-            value={form.token}
-            onChange={(e) => set('token', e.target.value)}
-            placeholder={
-              mode === 'edit' && stack?.has_token ? '•••• unchanged' : 'github_pat_… (optional for public repos)'
+        </Section>
+      )}
+
+      {inline ? (
+        <Section
+          title="Compose file"
+          aside={
+            <button type="button" className={btnSecondarySm} onClick={() => void checkCompose()} disabled={validating}>
+              {validating ? 'Validating…' : 'Validate'}
+            </button>
+          }
+        >
+          <Suspense
+            fallback={
+              <div className="h-96 animate-pulse rounded-md bg-zinc-100 dark:bg-zinc-800" aria-label="Loading editor" />
             }
-            autoComplete="new-password"
-            spellCheck={false}
-            disabled={busy || form.clear_token}
-          />
-          {mode === 'edit' && stack?.has_token && (
-            <label className="mt-2 flex items-center gap-2 text-sm text-zinc-700 dark:text-zinc-300">
+          >
+            <ComposeEditor
+              value={form.compose_content}
+              onChange={(v) => {
+                set('compose_content', v)
+                setValidation(null)
+              }}
+              readOnly={busy}
+            />
+          </Suspense>
+          {validation && (
+            <div
+              className={
+                validation.valid
+                  ? 'rounded-md border border-green-300 bg-green-50 px-3 py-2 text-sm text-green-800 dark:border-green-900 dark:bg-green-950/40 dark:text-green-300'
+                  : errorBox
+              }
+            >
+              <div className="font-medium">
+                {validation.valid ? 'Compose file is valid.' : 'Compose file is invalid:'}
+              </div>
+              {validation.output && (
+                <pre className="mt-1 font-mono text-xs whitespace-pre-wrap break-all">{validation.output}</pre>
+              )}
+            </div>
+          )}
+          <p className="-mt-2 text-xs text-zinc-500 dark:text-zinc-400">
+            Checked with <code className={code}>docker compose config</code>, using the environment variables below.
+            Relative paths (e.g. <code className={code}>./data:/data</code>) resolve to the stack’s directory under{' '}
+            <code className={code}>DATA_DIR</code> — see the README’s path notes.
+          </p>
+        </Section>
+      ) : (
+        <Section title="Repository">
+          <div>
+            <label htmlFor="repo_url" className={label}>
+              GitHub repository URL
+            </label>
+            <input
+              id="repo_url"
+              type="url"
+              className={input}
+              value={form.repo_url}
+              onChange={(e) => set('repo_url', e.target.value)}
+              placeholder="https://github.com/owner/repo"
+              autoComplete="off"
+              spellCheck={false}
+              required
+              disabled={busy}
+            />
+          </div>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div>
+              <label htmlFor="branch" className={label}>
+                Branch
+              </label>
               <input
-                type="checkbox"
-                checked={form.clear_token}
-                onChange={(e) => setForm((f) => ({ ...f, clear_token: e.target.checked, token: '' }))}
+                id="branch"
+                className={input}
+                value={form.branch}
+                onChange={(e) => set('branch', e.target.value)}
+                placeholder="main"
+                autoComplete="off"
+                spellCheck={false}
                 disabled={busy}
               />
-              Remove token
-            </label>
-          )}
-          <div className="mt-2">
-            <TokenHelp workflow={form.deploy_trigger === 'workflow'} />
+            </div>
+            <div>
+              <label htmlFor="compose_path" className={label}>
+                Compose file path
+              </label>
+              <input
+                id="compose_path"
+                className={`${input} font-mono`}
+                value={form.compose_path}
+                onChange={(e) => set('compose_path', e.target.value)}
+                placeholder="docker-compose.yml"
+                autoComplete="off"
+                spellCheck={false}
+                disabled={busy}
+              />
+              <p className={hint}>Relative to the repository root.</p>
+            </div>
           </div>
-        </div>
-      </Section>
+          <div>
+            <label htmlFor="token" className={label}>
+              Access token
+            </label>
+            <input
+              id="token"
+              type="password"
+              className={`${input} font-mono`}
+              value={form.token}
+              onChange={(e) => set('token', e.target.value)}
+              placeholder={
+                mode === 'edit' && stack?.has_token ? '•••• unchanged' : 'github_pat_… (optional for public repos)'
+              }
+              autoComplete="new-password"
+              spellCheck={false}
+              disabled={busy || form.clear_token}
+            />
+            {mode === 'edit' && stack?.has_token && (
+              <label className="mt-2 flex items-center gap-2 text-sm text-zinc-700 dark:text-zinc-300">
+                <input
+                  type="checkbox"
+                  checked={form.clear_token}
+                  onChange={(e) =>
+                    setForm((f) => ({
+                      ...f,
+                      clear_token: e.target.checked,
+                      token: '',
+                    }))
+                  }
+                  disabled={busy}
+                />
+                Remove token
+              </label>
+            )}
+            <div className="mt-2">
+              <TokenHelp workflow={form.deploy_trigger === 'workflow'} />
+            </div>
+          </div>
+        </Section>
+      )}
 
       <Section title="Environment variables">
         <p className="-mt-2 text-xs text-zinc-500 dark:text-zinc-400">
           Passed to <code className={code}>docker compose</code> (available for variable substitution in the compose
-          file). Values are stored server-side and never shown again. <code className={code}>COMMIT_SHA</code> and{' '}
-          <code className={code}>COMMIT_SHORT_SHA</code> (the deployed commit) are always set, e.g.{' '}
-          <code className={code}>image: ghcr.io/acme/app:$&#123;COMMIT_SHA&#125;</code>.
+          file). Values are stored server-side and never shown again.
+          {!inline && (
+            <>
+              {' '}
+              <code className={code}>COMMIT_SHA</code> and <code className={code}>COMMIT_SHORT_SHA</code> (the deployed
+              commit) are always set, e.g. <code className={code}>image: ghcr.io/acme/app:$&#123;COMMIT_SHA&#125;</code>
+              .
+            </>
+          )}
         </p>
         <KeyValueEditor rows={form.env} onChange={(rows) => set('env', rows)} disabled={busy} />
       </Section>
@@ -363,76 +545,98 @@ export default function StackForm({ mode }: Props) {
           <span>
             <span className="font-medium">Auto-deploy</span>
             <span className="block text-xs text-zinc-500 dark:text-zinc-400">
-              Redeploy automatically when new commits land on the branch (polling and GitHub webhook).
+              {inline
+                ? 'Deploy when the stack is created and whenever a changed compose file is saved.'
+                : 'Redeploy automatically when new commits land on the branch (polling and GitHub webhook).'}
             </span>
           </span>
         </label>
-        <fieldset className={form.auto_deploy ? '' : 'opacity-60'} disabled={busy}>
-          <legend className={label}>Deploy a new commit…</legend>
-          <div className="space-y-2">
-            <label className="flex items-start gap-2 text-sm">
-              <input
-                type="radio"
-                name="deploy_trigger"
-                className="mt-0.5"
-                checked={form.deploy_trigger === 'push'}
-                onChange={() => set('deploy_trigger', 'push')}
-              />
-              <span>
-                <span className="font-medium">As soon as it is pushed</span>
-                <span className="block text-xs text-zinc-500 dark:text-zinc-400">
-                  For stacks whose images don’t depend on the commit (or are built by compose itself).
+        {!inline && (
+          <fieldset className={form.auto_deploy ? '' : 'opacity-60'} disabled={busy}>
+            <legend className={label}>Deploy a new commit…</legend>
+            <div className="space-y-2">
+              <label className="flex items-start gap-2 text-sm">
+                <input
+                  type="radio"
+                  name="deploy_trigger"
+                  className="mt-0.5"
+                  checked={form.deploy_trigger === 'push'}
+                  onChange={() => set('deploy_trigger', 'push')}
+                />
+                <span>
+                  <span className="font-medium">As soon as it is pushed</span>
+                  <span className="block text-xs text-zinc-500 dark:text-zinc-400">
+                    For stacks whose images don’t depend on the commit (or are built by compose itself).
+                  </span>
                 </span>
-              </span>
-            </label>
-            <label className="flex items-start gap-2 text-sm">
-              <input
-                type="radio"
-                name="deploy_trigger"
-                className="mt-0.5"
-                checked={form.deploy_trigger === 'workflow'}
-                onChange={() => set('deploy_trigger', 'workflow')}
-              />
-              <span>
-                <span className="font-medium">After its GitHub Actions workflow succeeds</span>
-                <span className="block text-xs text-zinc-500 dark:text-zinc-400">
-                  Waits until the commit’s workflow runs finished successfully (e.g. images built and pushed), then
-                  deploys exactly that commit. Failed or cancelled runs are not deployed.
-                </span>
-              </span>
-            </label>
-          </div>
-          {form.deploy_trigger === 'workflow' && (
-            <div className="mt-3 pl-6">
-              <label htmlFor="workflow_name" className={label}>
-                Workflow <span className="font-normal text-zinc-500">(optional)</span>
               </label>
-              <input
-                id="workflow_name"
-                className={`${input} font-mono`}
-                value={form.workflow_name}
-                onChange={(e) => set('workflow_name', e.target.value)}
-                placeholder="all workflows"
-                autoComplete="off"
-                spellCheck={false}
-              />
-              <p className={hint}>
-                Name (<code className={code}>build</code>) or file (<code className={code}>build.yml</code>) of the
-                workflow that builds your images. Empty = wait for every workflow run of the commit.
-              </p>
+              <label className="flex items-start gap-2 text-sm">
+                <input
+                  type="radio"
+                  name="deploy_trigger"
+                  className="mt-0.5"
+                  checked={form.deploy_trigger === 'workflow'}
+                  onChange={() => set('deploy_trigger', 'workflow')}
+                />
+                <span>
+                  <span className="font-medium">After its GitHub Actions workflow succeeds</span>
+                  <span className="block text-xs text-zinc-500 dark:text-zinc-400">
+                    Waits until the commit’s workflow runs finished successfully (e.g. images built and pushed), then
+                    deploys exactly that commit. Failed or cancelled runs are not deployed.
+                  </span>
+                </span>
+              </label>
             </div>
-          )}
-        </fieldset>
+            {form.deploy_trigger === 'workflow' && (
+              <div className="mt-3 pl-6">
+                <label htmlFor="workflow_name" className={label}>
+                  Workflow <span className="font-normal text-zinc-500">(optional)</span>
+                </label>
+                <input
+                  id="workflow_name"
+                  className={`${input} font-mono`}
+                  value={form.workflow_name}
+                  onChange={(e) => set('workflow_name', e.target.value)}
+                  placeholder="all workflows"
+                  autoComplete="off"
+                  spellCheck={false}
+                />
+                <p className={hint}>
+                  Name (<code className={code}>build</code>) or file (<code className={code}>build.yml</code>) of the
+                  workflow that builds your images. Empty = wait for every workflow run of the commit.
+                </p>
+              </div>
+            )}
+          </fieldset>
+        )}
       </Section>
 
       {error && <div className={errorBox}>{error}</div>}
 
-      <div className="flex justify-end gap-2">
+      <div className="flex flex-wrap items-center justify-end gap-2">
+        {mode === 'edit' && inline && serverWillDeploy && (
+          <span className="mr-auto text-xs text-zinc-500">
+            Saving the changed compose file will redeploy the stack.
+          </span>
+        )}
         <Link to={backTo} className={btnSecondary}>
           Cancel
         </Link>
+        {mode === 'edit' && inline && !serverWillDeploy && (
+          <button type="button" className={btnSecondary} disabled={busy} onClick={(e) => void submit(e, true)}>
+            Save & deploy
+          </button>
+        )}
         <button type="submit" className={btnPrimary} disabled={busy}>
-          {busy ? 'Saving…' : mode === 'create' ? 'Create stack' : 'Save changes'}
+          {busy
+            ? 'Saving…'
+            : mode === 'create'
+              ? inline && form.auto_deploy
+                ? 'Create & deploy'
+                : 'Create stack'
+              : serverWillDeploy
+                ? 'Save & deploy'
+                : 'Save changes'}
         </button>
       </div>
     </form>

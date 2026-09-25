@@ -33,6 +33,12 @@ const (
 	StatusStopped   = "stopped"
 )
 
+// Stack sources.
+const (
+	SourceGit    = "git"    // compose file from a GitHub/HTTPS repository
+	SourceInline = "inline" // compose file edited in the UI, stored in ComposeContent
+)
+
 // Deploy triggers.
 const (
 	TriggerPush     = "push"     // deploy every new commit on the branch
@@ -163,6 +169,8 @@ type Stack struct {
 	LastDeployAt     *time.Time
 	LastError        string
 	LastLog          string
+	Source           string // SourceGit | SourceInline
+	ComposeContent   string // SourceInline only
 	DeployTrigger    string // TriggerPush | TriggerWorkflow
 	WorkflowName     string // optional, TriggerWorkflow only
 	WaitingSHA       string // commit waiting for its workflow ("" = none)
@@ -173,7 +181,7 @@ type Stack struct {
 
 const stackCols = `id, name, repo_url, branch, compose_path, auto_deploy, token_enc, webhook_secret_enc,
 	env_enc, status, last_sha, last_deploy_at, last_error, last_log, deploy_trigger, workflow_name,
-	waiting_sha, waiting_reason, created_at, updated_at`
+	waiting_sha, waiting_reason, source, compose_content, created_at, updated_at`
 
 type scanner interface{ Scan(...any) error }
 
@@ -184,7 +192,7 @@ func scanStack(r scanner) (*Stack, error) {
 	var created, updated string
 	err := r.Scan(&s.ID, &s.Name, &s.RepoURL, &s.Branch, &s.ComposePath, &auto, &s.TokenEnc,
 		&s.WebhookSecretEnc, &s.EnvEnc, &s.Status, &s.LastSHA, &lastDeploy, &s.LastError,
-		&s.LastLog, &s.DeployTrigger, &s.WorkflowName, &s.WaitingSHA, &s.WaitingReason, &created, &updated)
+		&s.LastLog, &s.DeployTrigger, &s.WorkflowName, &s.WaitingSHA, &s.WaitingReason, &s.Source, &s.ComposeContent, &created, &updated)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
@@ -217,12 +225,15 @@ func (d *DB) CreateStack(ctx context.Context, s *Stack) error {
 	if s.DeployTrigger == "" {
 		s.DeployTrigger = TriggerPush
 	}
+	if s.Source == "" {
+		s.Source = SourceGit
+	}
 	res, err := d.sql.ExecContext(ctx, `INSERT INTO stacks
 		(name, repo_url, branch, compose_path, auto_deploy, token_enc, webhook_secret_enc, env_enc, status,
-		 deploy_trigger, workflow_name, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 deploy_trigger, workflow_name, source, compose_content, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		s.Name, s.RepoURL, s.Branch, s.ComposePath, b2i(s.AutoDeploy), s.TokenEnc, s.WebhookSecretEnc,
-		s.EnvEnc, s.Status, s.DeployTrigger, s.WorkflowName, ts(now), ts(now))
+		s.EnvEnc, s.Status, s.DeployTrigger, s.WorkflowName, s.Source, s.ComposeContent, ts(now), ts(now))
 	if err != nil {
 		if isUnique(err) {
 			return ErrConflict
@@ -262,9 +273,9 @@ func (d *DB) UpdateStackConfig(ctx context.Context, s *Stack) error {
 	now := d.now()
 	res, err := d.sql.ExecContext(ctx, `UPDATE stacks SET repo_url = ?, branch = ?, compose_path = ?,
 		auto_deploy = ?, token_enc = ?, webhook_secret_enc = ?, env_enc = ?, deploy_trigger = ?, workflow_name = ?,
-		waiting_sha = '', waiting_reason = '', updated_at = ? WHERE id = ?`,
+		compose_content = ?, waiting_sha = '', waiting_reason = '', updated_at = ? WHERE id = ?`,
 		s.RepoURL, s.Branch, s.ComposePath, b2i(s.AutoDeploy), s.TokenEnc, s.WebhookSecretEnc, s.EnvEnc,
-		s.DeployTrigger, s.WorkflowName, ts(now), s.ID)
+		s.DeployTrigger, s.WorkflowName, s.ComposeContent, ts(now), s.ID)
 	if err != nil {
 		return err
 	}

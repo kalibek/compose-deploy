@@ -69,6 +69,21 @@ Add credentials on the **Registries** page; all of them are applied to every dep
 | Docker Hub | `docker.io` (or `https://index.docker.io/v1/`) | Docker Hub user | access token |
 | Others (GitLab, ECR, self-hosted, ...) | registry host, e.g. `registry.gitlab.com` | user | password / token |
 
+## Stacks without git: compose editor
+
+For a quick stack you don't want to keep in a repository, pick **Compose editor** as the source when creating
+it and write the `docker-compose.yml` in the browser (YAML editor with syntax highlighting).
+
+- **Validate** runs `docker compose config` on the draft, using the stack's environment variables.
+- With auto-deploy on, the stack is deployed when created and whenever a **changed** file is saved; otherwise
+  use *Save & deploy* / *Deploy now*. There's nothing to poll and no webhook.
+- The file is stored in the database and written to `DATA_DIR/stacks/<name>/inline/docker-compose.yml` for
+  each deploy; that directory is the compose project directory, so relative paths resolve there (see the
+  path gotcha below). Environment variables, private registries, container logs and the shell work the same
+  as for git stacks.
+- The stack page shows the deployed revision (a hash of the file) and flags saved changes that aren't deployed
+  yet. The source can't be changed after creation.
+
 ## Images built by GitHub Actions
 
 If your images are built by a GitHub Actions pipeline, deploying on push is too early: the new images don't

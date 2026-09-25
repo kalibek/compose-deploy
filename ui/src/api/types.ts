@@ -1,5 +1,8 @@
 export type StackStatus = 'idle' | 'queued' | 'deploying' | 'success' | 'failed' | 'stopped'
 
+/** git: compose file from a repository; inline: compose file edited in the UI. */
+export type StackSource = 'git' | 'inline'
+
 /** push: deploy every new commit; workflow: deploy once the commit's GitHub Actions run(s) succeeded. */
 export type DeployTrigger = 'push' | 'workflow'
 
@@ -17,6 +20,11 @@ export interface Stack {
   last_sha: string
   last_deploy_at: string | null
   last_error: string
+  source: StackSource
+  /** Inline stacks only: the compose file. */
+  compose_content: string
+  /** Inline stacks only: revision of compose_content; equals last_sha once deployed. */
+  content_sha: string
   deploy_trigger: DeployTrigger
   /** Workflow name or file to wait for ("" = all workflows). */
   workflow_name: string
@@ -29,7 +37,9 @@ export interface Stack {
 
 export interface CreateStackRequest {
   name: string
-  repo_url: string
+  source?: StackSource
+  compose_content?: string
+  repo_url?: string
   branch?: string
   compose_path?: string
   token?: string
@@ -55,6 +65,20 @@ export interface UpdateStackRequest {
   env?: Record<string, string | null>
   deploy_trigger?: DeployTrigger
   workflow_name?: string
+  compose_content?: string
+}
+
+export interface ValidateComposeRequest {
+  content: string
+  /** Use this stack's stored env vars for interpolation. */
+  stack_id?: number
+  /** Draft env vars (null = keep the stored value). */
+  env?: Record<string, string | null>
+}
+
+export interface ValidateComposeResponse {
+  valid: boolean
+  output: string
 }
 
 export interface StackStatusResponse {

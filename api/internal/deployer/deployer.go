@@ -4,8 +4,11 @@
 package deployer
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -281,14 +284,10 @@ func (d *Deployer) execDeploy(id int64, force bool, target string) {
 	}
 }
 
-// deploy performs the actual work; it returns the synced sha (if sync succeeded).
+// deploy performs the actual work; it returns the synced sha (if sync
+// succeeded) or, for inline stacks, the ContentSHA of the deployed file.
 // target pins the commit to deploy ("" = branch head).
 func (d *Deployer) deploy(ctx context.Context, st *db.Stack, target string, lb *logBuf) (string, error) {
-	token, err := d.box.DecryptString(st.TokenEnc)
-	if err != nil {
-		return "", errors.New("cannot decrypt token (APP_SECRET changed?)")
-	}
-	lb.addSecrets(gitops.Secrets(token)...)
 	env, err := d.decryptEnv(st.EnvEnc)
 	if err != nil {
 		return "", errors.New("cannot decrypt env (APP_SECRET changed?)")
@@ -303,16 +302,28 @@ func (d *Deployer) deploy(ctx context.Context, st *db.Stack, target string, lb *
 	if err := os.MkdirAll(stackDir, 0o700); err != nil {
 		return "", err
 	}
-	repoDir := RepoDir(d.dataDir, st.Name)
 
-	sha, err := d.git.Sync(ctx, repoDir, st.RepoURL, st.Branch, token, target, lb)
-	if err != nil {
-		return "", err
-	}
-
-	composeFile, projDir, err := resolveCompose(repoDir, st.ComposePath)
-	if err != nil {
-		return sha, err
+	var sha, composeFile, projDir string
+	var cenv []string
+	if st.Source == db.SourceInline {
+		if composeFile, projDir, sha, err = writeInline(stackDir, st.ComposeContent, lb); err != nil {
+			return "", err
+		}
+	} else {
+		token, err := d.box.DecryptString(st.TokenEnc)
+		if err != nil {
+			return "", errors.New("cannot decrypt token (APP_SECRET changed?)")
+		}
+		lb.addSecrets(gitops.Secrets(token)...)
+		repoDir := RepoDir(d.dataDir, st.Name)
+		if sha, err = d.git.Sync(ctx, repoDir, st.RepoURL, st.Branch, token, target, lb); err != nil {
+			return "", err
+		}
+		if composeFile, projDir, err = resolveCompose(repoDir, st.ComposePath); err != nil {
+			return sha, err
+		}
+		cenv = commitEnv(sha)
+		fmt.Fprintf(lb, "COMMIT_SHA=%s COMMIT_SHORT_SHA=%s\n", sha, sha[:7])
 	}
 	if err := writeEnvFile(stackDir, projDir, env, lb); err != nil {
 		return sha, err
@@ -324,8 +335,7 @@ func (d *Deployer) deploy(ctx context.Context, st *db.Stack, target string, lb *
 	}
 	defer cleanup()
 
-	cenv := append([]string{"DOCKER_CONFIG=" + dockerCfg}, commitEnv(sha)...)
-	fmt.Fprintf(lb, "COMMIT_SHA=%s COMMIT_SHORT_SHA=%s\n", sha, sha[:7])
+	cenv = append([]string{"DOCKER_CONFIG=" + dockerCfg}, cenv...)
 	base := composeBase(st.Name, composeFile, projDir)
 	steps := [][]string{
 		append(append([]string{}, base...), "down", "--remove-orphans"),
@@ -338,6 +348,36 @@ func (d *Deployer) deploy(ctx context.Context, st *db.Stack, target string, lb *
 		}
 	}
 	return sha, nil
+}
+
+// InlineDir is DATA_DIR/stacks/<name>/inline, the project directory of inline stacks.
+func InlineDir(dataDir, name string) string { return filepath.Join(StackDir(dataDir, name), "inline") }
+
+// InlineFile is the name of the compose file written for inline stacks.
+const InlineFile = "docker-compose.yml"
+
+// ContentSHA identifies a revision of an inline compose file (stored as last_sha).
+func ContentSHA(content string) string {
+	sum := sha256.Sum256([]byte(content))
+	return hex.EncodeToString(sum[:])
+}
+
+// writeInline writes an inline stack's compose file into its project directory.
+func writeInline(stackDir, content string, out io.Writer) (file, projDir, sha string, err error) {
+	if strings.TrimSpace(content) == "" {
+		return "", "", "", errors.New("the compose file is empty")
+	}
+	projDir = filepath.Join(stackDir, "inline")
+	if err := os.MkdirAll(projDir, 0o700); err != nil {
+		return "", "", "", err
+	}
+	file = filepath.Join(projDir, InlineFile)
+	if err := os.WriteFile(file, []byte(content), 0o600); err != nil {
+		return "", "", "", fmt.Errorf("write compose file: %w", err)
+	}
+	sha = ContentSHA(content)
+	fmt.Fprintf(out, "wrote inline compose file (revision %s)\n", sha[:12])
+	return file, projDir, sha, nil
 }
 
 // commitEnv exposes the deployed commit to compose interpolation, e.g.
@@ -571,13 +611,63 @@ func (d *Deployer) Down(ctx context.Context, st *db.Stack) error {
 }
 
 func (d *Deployer) down(ctx context.Context, st *db.Stack, out io.Writer) error {
-	repoDir := RepoDir(d.dataDir, st.Name)
 	args := []string{"compose", "-p", st.Name, "down", "--remove-orphans"}
 	dir := ""
-	if file, projDir, err := resolveCompose(repoDir, st.ComposePath); err == nil {
+	var env []string
+	if st.Source == db.SourceInline {
+		projDir := InlineDir(d.dataDir, st.Name)
+		file := filepath.Join(projDir, InlineFile)
+		if _, err := os.Stat(file); err == nil {
+			args = append(composeBase(st.Name, file, projDir), "down", "--remove-orphans")
+			dir = projDir
+		}
+	} else if file, projDir, err := resolveCompose(RepoDir(d.dataDir, st.Name), st.ComposePath); err == nil {
 		args = append(composeBase(st.Name, file, projDir), "down", "--remove-orphans")
 		dir = projDir
+		// Same interpolation as at deploy time (e.g. ${COMMIT_SHA:?} must resolve).
+		env = commitEnv(st.LastSHA)
 	}
-	// Same interpolation as at deploy time (e.g. ${COMMIT_SHA:?} must resolve).
-	return d.docker(ctx, dir, commitEnv(st.LastSHA), out, args)
+	return d.docker(ctx, dir, env, out, args)
+}
+
+// ValidateCompose runs `docker compose config --quiet` on a draft compose file
+// (with the given env written to .env, as at deploy time). It returns the
+// command output; err is non-nil when the file is invalid or docker failed.
+func (d *Deployer) ValidateCompose(ctx context.Context, content string, env map[string]string) (string, error) {
+	if strings.TrimSpace(content) == "" {
+		return "", errors.New("the compose file is empty")
+	}
+	tmpRoot := filepath.Join(d.dataDir, "tmp")
+	if err := os.MkdirAll(tmpRoot, 0o700); err != nil {
+		return "", err
+	}
+	dir, err := os.MkdirTemp(tmpRoot, "validate-")
+	if err != nil {
+		return "", err
+	}
+	defer os.RemoveAll(dir)
+	file := filepath.Join(dir, InlineFile)
+	if err := os.WriteFile(file, []byte(content), 0o600); err != nil {
+		return "", err
+	}
+	if len(env) > 0 {
+		if err := os.WriteFile(filepath.Join(dir, ".env"), []byte(FormatEnv(env)), 0o600); err != nil {
+			return "", err
+		}
+	}
+	var out bytes.Buffer
+	cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	args := []string{"compose", "-p", "validate", "-f", file, "--project-directory", dir, "config", "--quiet"}
+	err = d.run.Run(cctx, runner.Cmd{Name: "docker", Args: args, Dir: dir}, &out)
+	// Don't leak the temp path into messages shown in the UI.
+	msg := strings.ReplaceAll(out.String(), dir+string(filepath.Separator), "")
+	msg = strings.TrimSpace(strings.ReplaceAll(msg, dir, "."))
+	if err != nil {
+		if msg == "" {
+			msg = err.Error()
+		}
+		return msg, errors.New(msg)
+	}
+	return msg, nil
 }

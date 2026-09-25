@@ -334,3 +334,72 @@ func TestDeployPinnedSHA(t *testing.T) {
 		t.Fatalf("git cmds:\n%s\nwant:\n%s", strings.Join(gitCmds, "\n"), strings.Join(want, "\n"))
 	}
 }
+
+func TestDeployInline(t *testing.T) {
+	f := &fakeRunner{}
+	dep, d, box, dataDir := setup(t, f)
+	content := "services:\n  web:\n    image: nginx\n"
+	envJSON, _ := json.Marshal(map[string]string{"A": "1"})
+	env, _ := box.Encrypt(envJSON)
+	st := &db.Stack{Name: "web", Source: db.SourceInline, ComposeContent: content, ComposePath: InlineFile, AutoDeploy: true, EnvEnc: env}
+	if err := d.CreateStack(context.Background(), st); err != nil {
+		t.Fatal(err)
+	}
+
+	dep.Enqueue(st.ID, false)
+	got := waitStatus(t, d, st.ID, db.StatusSuccess, db.StatusFailed)
+	if got.Status != db.StatusSuccess || got.LastSHA != ContentSHA(content) {
+		t.Fatalf("status %s sha %s: %s\n%s", got.Status, got.LastSHA, got.LastError, got.LastLog)
+	}
+	projDir := filepath.Join(dataDir, "stacks", "web", "inline")
+	file := filepath.Join(projDir, InlineFile)
+	if b, _ := os.ReadFile(file); string(b) != content {
+		t.Fatalf("compose file = %q", b)
+	}
+	if b, _ := os.ReadFile(filepath.Join(projDir, ".env")); !strings.Contains(string(b), "A=") {
+		t.Fatalf(".env = %q", b)
+	}
+	base := strings.Join([]string{"compose", "-p", "web", "-f", file, "--project-directory", projDir}, " ")
+	var cmds []string
+	for _, c := range f.cmds {
+		cmds = append(cmds, c.Name+" "+strings.Join(c.Args, " "))
+		if strings.Contains(strings.Join(c.Env, " "), "COMMIT_SHA") {
+			t.Errorf("inline deploy must not set COMMIT_SHA: %v", c.Env)
+		}
+	}
+	want := []string{"docker " + base + " down --remove-orphans", "docker " + base + " pull", "docker " + base + " up -d --remove-orphans"}
+	if strings.Join(cmds, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("cmds:\n%s", strings.Join(cmds, "\n"))
+	}
+
+	// stop uses the written file too
+	f.cmds = nil
+	dep.Stop(st.ID)
+	waitStatus(t, d, st.ID, db.StatusStopped)
+	if len(f.cmds) != 1 || strings.Join(f.cmds[0].Args, " ") != base+" down --remove-orphans" {
+		t.Fatalf("stop cmds %v", f.cmds)
+	}
+}
+
+func TestValidateCompose(t *testing.T) {
+	f := &fakeRunner{}
+	dep, _, _, dataDir := setup(t, f)
+	out, err := dep.ValidateCompose(context.Background(), "services: {}\n", map[string]string{"A": "1"})
+	if err != nil {
+		t.Fatalf("%q %v", out, err)
+	}
+	args := strings.Join(f.cmds[0].Args, " ")
+	if !strings.HasPrefix(args, "compose -p validate -f "+filepath.Join(dataDir, "tmp")) || !strings.HasSuffix(args, "config --quiet") {
+		t.Fatalf("args %q", args)
+	}
+	if entries, _ := os.ReadDir(filepath.Join(dataDir, "tmp")); len(entries) != 0 {
+		t.Fatalf("temp dir not cleaned: %v", entries)
+	}
+	f.failOn = "config"
+	if _, err := dep.ValidateCompose(context.Background(), "services: {}\n", nil); err == nil {
+		t.Fatal("expected validation error")
+	}
+	if _, err := dep.ValidateCompose(context.Background(), " \n", nil); err == nil {
+		t.Fatal("expected empty-file error")
+	}
+}

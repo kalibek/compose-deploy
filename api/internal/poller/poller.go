@@ -80,8 +80,8 @@ func (p *Poller) Tick(ctx context.Context, log *slog.Logger) {
 		if ctx.Err() != nil {
 			return
 		}
-		if !st.AutoDeploy {
-			continue
+		if !st.AutoDeploy || st.Source == db.SourceInline {
+			continue // inline stacks deploy when saved, there's nothing to poll
 		}
 		switch st.Status {
 		case db.StatusStopped, db.StatusQueued, db.StatusDeploying:

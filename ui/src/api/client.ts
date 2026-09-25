@@ -8,6 +8,8 @@ import type {
   Stack,
   StackStatusResponse,
   UpdateStackRequest,
+  ValidateComposeRequest,
+  ValidateComposeResponse,
   WebhookSecretResponse,
 } from './types'
 
@@ -107,6 +109,8 @@ export const api = {
   rotateWebhookSecret: (id: number | string) =>
     request<WebhookSecretResponse>(`/stacks/${id}/webhook-secret`, { method: 'POST' }),
 
+  validateCompose: (body: ValidateComposeRequest) =>
+    request<ValidateComposeResponse>('/compose/validate', { method: 'POST', body }),
   listContainers: (id: number | string) => request<Container[]>(`/stacks/${id}/containers`),
 
   listRegistries: () => request<Registry[]>('/registries'),

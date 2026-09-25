@@ -15,6 +15,7 @@ import {
   btnDangerSolidSm,
   btnPrimary,
   btnSecondary,
+  btnSecondarySm,
   card,
   code,
   errorBox,
@@ -112,6 +113,7 @@ export default function StackDetail() {
   const lastDeployAt = st ? st.last_deploy_at : stack.last_deploy_at
   const lastError = st?.last_error ?? stack.last_error
   const busy = isBusy(status)
+  const inline = stack.source === 'inline'
 
   return (
     <div className="space-y-4">
@@ -170,22 +172,30 @@ export default function StackDetail() {
         <section className={card}>
           <h2 className="mb-2 text-sm font-semibold">Configuration</h2>
           <dl className="divide-y divide-zinc-100 dark:divide-zinc-800">
-            <Row label="Repository">
-              <a href={stack.repo_url} target="_blank" rel="noreferrer" className={link}>
-                {stack.repo_url}
-              </a>
-            </Row>
-            <Row label="Branch">
-              <code className={code}>{stack.branch}</code>
-            </Row>
-            <Row label="Compose file">
-              <code className={code}>{stack.compose_path}</code>
-            </Row>
-            <Row label="Access token">{stack.has_token ? 'configured' : 'none (public repo)'}</Row>
+            {inline ? (
+              <Row label="Source">compose editor</Row>
+            ) : (
+              <>
+                <Row label="Repository">
+                  <a href={stack.repo_url} target="_blank" rel="noreferrer" className={link}>
+                    {stack.repo_url}
+                  </a>
+                </Row>
+                <Row label="Branch">
+                  <code className={code}>{stack.branch}</code>
+                </Row>
+                <Row label="Compose file">
+                  <code className={code}>{stack.compose_path}</code>
+                </Row>
+                <Row label="Access token">{stack.has_token ? 'configured' : 'none (public repo)'}</Row>
+              </>
+            )}
             <Row label="Auto-deploy">
               {!stack.auto_deploy
                 ? 'disabled'
-                : stack.deploy_trigger === 'workflow'
+                : inline
+                  ? 'when the compose file is saved'
+                  : stack.deploy_trigger === 'workflow'
                   ? `after ${stack.workflow_name ? `workflow “${stack.workflow_name}”` : 'all workflows'} succeed${stack.workflow_name ? 's' : ''}`
                   : 'on push'}
             </Row>
@@ -211,8 +221,21 @@ export default function StackDetail() {
             <Row label="Status">
               <StatusBadge status={status} />
             </Row>
-            <Row label="Deployed commit">
-              {lastSha ? (
+            <Row label={inline ? 'Deployed revision' : 'Deployed commit'}>
+              {inline ? (
+                lastSha ? (
+                  <span className="inline-flex flex-wrap items-center gap-2">
+                    <code className={code} title={lastSha}>
+                      {lastSha.slice(0, 12)}
+                    </code>
+                    {lastSha !== stack.content_sha && (
+                      <span className="text-xs text-amber-700 dark:text-amber-400">saved changes not deployed</span>
+                    )}
+                  </span>
+                ) : (
+                  <span className="text-zinc-500">never deployed</span>
+                )
+              ) : lastSha ? (
                 <span className="inline-flex items-center gap-2">
                   <code className={code} title={lastSha}>
                     {shortSha(lastSha)}
@@ -263,30 +286,46 @@ export default function StackDetail() {
         <LogViewer text={st?.last_log ?? ''} />
       </section>
 
-      <section className={card}>
-        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-          <h2 className="text-sm font-semibold">GitHub webhook</h2>
-          <ConfirmButton
-            onConfirm={rotate}
-            className={btnDangerSm}
-            confirmClassName={btnDangerSolidSm}
-            confirmLabel="Confirm rotate"
-          >
-            Rotate secret
-          </ConfirmButton>
-        </div>
-        {newSecret && (
-          <p className="mb-2 text-xs text-zinc-600 dark:text-zinc-400">
-            Secret rotated. Update it in the GitHub webhook settings — the old secret no longer works.
-          </p>
-        )}
-        <WebhookSetup
-          webhookUrl={stack.webhook_url}
-          secret={newSecret ?? undefined}
-          branch={stack.branch}
-          trigger={stack.deploy_trigger}
-        />
-      </section>
+      {inline && (
+        <section className={card}>
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <h2 className="text-sm font-semibold">Compose file</h2>
+            <Link to={`/stacks/${stack.id}/edit`} className={btnSecondarySm}>
+              Edit
+            </Link>
+          </div>
+          <pre className="max-h-[28rem] overflow-auto rounded-md bg-zinc-50 p-3 font-mono text-xs leading-relaxed ring-1 ring-zinc-200 dark:bg-zinc-950 dark:ring-zinc-800">
+            {stack.compose_content}
+          </pre>
+        </section>
+      )}
+
+      {!inline && (
+        <section className={card}>
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+            <h2 className="text-sm font-semibold">GitHub webhook</h2>
+            <ConfirmButton
+              onConfirm={rotate}
+              className={btnDangerSm}
+              confirmClassName={btnDangerSolidSm}
+              confirmLabel="Confirm rotate"
+            >
+              Rotate secret
+            </ConfirmButton>
+          </div>
+          {newSecret && (
+            <p className="mb-2 text-xs text-zinc-600 dark:text-zinc-400">
+              Secret rotated. Update it in the GitHub webhook settings — the old secret no longer works.
+            </p>
+          )}
+          <WebhookSetup
+            webhookUrl={stack.webhook_url}
+            secret={newSecret ?? undefined}
+            branch={stack.branch}
+            trigger={stack.deploy_trigger}
+          />
+        </section>
+      )}
 
       <section className={`${card} border-red-200 dark:border-red-900/60`}>
         <h2 className="mb-2 text-sm font-semibold text-red-700 dark:text-red-400">Delete stack</h2>

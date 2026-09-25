@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
@@ -40,6 +41,12 @@ func (f *fakeDeployer) EnqueueSHA(id int64, sha string) {
 	f.mu.Lock()
 	f.shas = append(f.shas, sha)
 	f.mu.Unlock()
+}
+func (f *fakeDeployer) ValidateCompose(ctx context.Context, content string, env map[string]string) (string, error) {
+	if strings.Contains(content, "bad") {
+		return "yaml: line 1: bad", errors.New("yaml: line 1: bad")
+	}
+	return "env=" + env["A"], nil
 }
 func (f *fakeDeployer) Stop(id int64) { f.mu.Lock(); f.stopped = append(f.stopped, id); f.mu.Unlock() }
 func (f *fakeDeployer) Down(ctx context.Context, st *db.Stack) error {
@@ -199,7 +206,7 @@ func TestAPIFlow(t *testing.T) {
 	json.Unmarshal(body, &got)
 	wantKeys := []string{"id", "name", "repo_url", "branch", "compose_path", "auto_deploy", "has_token", "env_keys",
 		"webhook_url", "status", "last_sha", "last_deploy_at", "last_error", "deploy_trigger", "workflow_name",
-		"waiting_sha", "waiting_reason", "created_at", "updated_at"}
+		"waiting_sha", "waiting_reason", "source", "compose_content", "content_sha", "created_at", "updated_at"}
 	if len(got) != len(wantKeys) {
 		t.Fatalf("unexpected field set: %v", got)
 	}
