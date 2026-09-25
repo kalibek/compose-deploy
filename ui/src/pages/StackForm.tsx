@@ -9,9 +9,9 @@ import type {
   UpdateStackRequest,
   ValidateComposeResponse,
 } from '../api/types'
-import KeyValueEditor from '../components/KeyValueEditor'
+import EnvEditor from '../components/EnvEditor'
 import WebhookSetup from '../components/WebhookSetup'
-import { envForCreate, envForUpdate, rowsFromKeys, validateEnv, type EnvRow } from '../lib/env'
+import { envForCreate, envForUpdate, newDraft, resolveDraft, rowsFromKeys, type EnvDraft } from '../lib/env'
 import { SLUG_RE } from '../lib/format'
 import { btnPrimary, btnSecondary, btnSecondarySm, card, code, errorBox, hint, input, label, link } from '../lib/ui'
 
@@ -34,7 +34,7 @@ interface FormState {
   auto_deploy: boolean
   deploy_trigger: DeployTrigger
   workflow_name: string
-  env: EnvRow[]
+  env: EnvDraft
 }
 
 const composeTemplate = `services:
@@ -45,7 +45,9 @@ const composeTemplate = `services:
     restart: unless-stopped
 `
 
-const emptyForm: FormState = {
+const noKeys: string[] = []
+
+const emptyForm = (): FormState => ({
   name: '',
   source: 'git',
   compose_content: composeTemplate,
@@ -57,8 +59,8 @@ const emptyForm: FormState = {
   auto_deploy: true,
   deploy_trigger: 'push',
   workflow_name: '',
-  env: [],
-}
+  env: newDraft([]),
+})
 
 function formFromStack(s: Stack): FormState {
   return {
@@ -73,17 +75,17 @@ function formFromStack(s: Stack): FormState {
     auto_deploy: s.auto_deploy,
     deploy_trigger: s.deploy_trigger,
     workflow_name: s.workflow_name,
-    env: rowsFromKeys(s.env_keys),
+    env: newDraft(rowsFromKeys(s.env_keys)),
   }
 }
 
-function validate(f: FormState, mode: Props['mode']): string | null {
+function validate(f: FormState, mode: Props['mode'], existingKeys: string[]): string | null {
   if (mode === 'create' && !SLUG_RE.test(f.name)) {
     return 'Name must be lowercase letters, digits and dashes, starting with a letter or digit (max 63 chars)'
   }
   if (f.source === 'inline') {
     if (!f.compose_content.trim()) return 'The compose file is empty'
-    return validateEnv(f.env)
+    return resolveDraft(f.env, existingKeys).error
   }
   if (!/^https:\/\/\S+$/.test(f.repo_url.trim())) return 'Repository URL must start with https://'
   if (f.deploy_trigger === 'workflow' && !/^https:\/\/github\.com\/[^/\s]+\/[^/\s]+\/?$/i.test(f.repo_url.trim())) {
@@ -93,7 +95,7 @@ function validate(f: FormState, mode: Props['mode']): string | null {
   if (cp.startsWith('/') || cp.split('/').includes('..')) {
     return 'Compose path must be relative to the repository root and must not contain ".."'
   }
-  return validateEnv(f.env)
+  return resolveDraft(f.env, existingKeys).error
 }
 
 function Section({ title, children, aside }: { title: string; children: ReactNode; aside?: ReactNode }) {
@@ -233,7 +235,15 @@ export default function StackForm({ mode }: Props) {
   // The server deploys an inline stack by itself when a changed file is saved with auto-deploy on.
   const serverWillDeploy = inline && form.auto_deploy && contentChanged && stack?.status !== 'stopped'
 
+  const existingKeys = stack?.env_keys ?? noKeys
+  const envRows = () => resolveDraft(form.env, existingKeys).rows
+
   async function checkCompose() {
+    const envError = resolveDraft(form.env, existingKeys).error
+    if (envError) {
+      setValidation({ valid: false, output: envError })
+      return
+    }
     setValidating(true)
     setValidation(null)
     try {
@@ -241,7 +251,7 @@ export default function StackForm({ mode }: Props) {
         await api.validateCompose({
           content: form.compose_content,
           stack_id: stack?.id,
-          env: stack ? envForUpdate(form.env) : envForCreate(form.env),
+          env: stack ? envForUpdate(envRows()) : envForCreate(envRows()),
         }),
       )
     } catch (err) {
@@ -253,7 +263,7 @@ export default function StackForm({ mode }: Props) {
 
   async function submit(e: FormEvent, deployAfter = false) {
     e.preventDefault()
-    const v = validate(form, mode)
+    const v = validate(form, mode, existingKeys)
     if (v) {
       setError(v)
       return
@@ -267,7 +277,7 @@ export default function StackForm({ mode }: Props) {
             name: form.name.trim(),
             source: 'inline',
             compose_content: form.compose_content,
-            env: envForCreate(form.env),
+            env: envForCreate(envRows()),
             auto_deploy: form.auto_deploy,
           })
           navigate(`/stacks/${res.stack.id}`)
@@ -280,7 +290,7 @@ export default function StackForm({ mode }: Props) {
           branch: form.branch.trim() || undefined,
           compose_path: form.compose_path.trim() || undefined,
           token: token || undefined,
-          env: envForCreate(form.env),
+          env: envForCreate(envRows()),
           auto_deploy: form.auto_deploy,
           deploy_trigger: form.deploy_trigger,
           workflow_name: form.workflow_name.trim(),
@@ -292,7 +302,7 @@ export default function StackForm({ mode }: Props) {
           body = {
             compose_content: form.compose_content,
             auto_deploy: form.auto_deploy,
-            env: envForUpdate(form.env),
+            env: envForUpdate(envRows()),
           }
         } else {
           body = {
@@ -302,7 +312,7 @@ export default function StackForm({ mode }: Props) {
             auto_deploy: form.auto_deploy,
             deploy_trigger: form.deploy_trigger,
             workflow_name: form.workflow_name.trim(),
-            env: envForUpdate(form.env),
+            env: envForUpdate(envRows()),
           }
           if (form.clear_token) body.clear_token = true
           else if (form.token.trim()) body.token = form.token.trim()
@@ -530,7 +540,7 @@ export default function StackForm({ mode }: Props) {
             </>
           )}
         </p>
-        <KeyValueEditor rows={form.env} onChange={(rows) => set('env', rows)} disabled={busy} />
+        <EnvEditor draft={form.env} onChange={(d) => set('env', d)} existingKeys={existingKeys} disabled={busy} />
       </Section>
 
       <Section title="Deployment">

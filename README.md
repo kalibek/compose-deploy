@@ -69,6 +69,15 @@ Add credentials on the **Registries** page; all of them are applied to every dep
 | Docker Hub | `docker.io` (or `https://index.docker.io/v1/`) | Docker Hub user | access token |
 | Others (GitLab, ECR, self-hosted, ...) | registry host, e.g. `registry.gitlab.com` | user | password / token |
 
+## Environment variables
+
+Each stack's variables are edited either **one by one** or as **`.env` text** (toggle above the editor; the
+choice is remembered per browser). The text format is the single-line subset of compose's `.env` syntax:
+`KEY=value` per line, `#` comments, optional `export`, `'single'` quotes taken literally and `"double"` quotes
+with `\"`, `\\` and `\$` escapes. Multi-line values aren't supported. Errors are reported per line and block
+saving. Stored values are never sent back to the browser: saved variables show as `KEY=<unchanged>` — replace
+the marker to change a value, delete the line to remove the variable.
+
 ## Stacks without git: compose editor
 
 For a quick stack you don't want to keep in a repository, pick **Compose editor** as the source when creating
