@@ -1,0 +1,31 @@
+services:
+  compose-deploy:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    # image: compose-deploy:latest
+    # container_name: compose-deploy
+    ports:
+      - "3000:3000"
+    environment:
+      # Set these in .env (see .env.example) or inline them here.
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?set ADMIN_PASSWORD}
+      APP_SECRET: ${APP_SECRET:?set APP_SECRET}
+      DATA_DIR: /opt/compose-deploy
+      POLL_INTERVAL: ${POLL_INTERVAL:-60s}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      TRUST_PROXY: ${TRUST_PROXY:-false}
+    # Needed where SELinux is enforcing (Podman machine, Fedora/RHEL hosts) so the
+    # container may use the engine socket; harmless elsewhere.
+    security_opt:
+      - label=disable
+    volumes:
+      # Engine API socket as seen by the engine host (inside the VM for Podman).
+      - ${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock
+      # Database + stack checkouts. For stacks with relative bind mounts (./x:/y)
+      # use a same-path bind instead, e.g. /opt/compose-deploy:/opt/compose-deploy
+      # (see README "Path gotcha").
+      - compose_deploy_data:/opt/compose-deploy
+    restart: unless-stopped
+volumes:
+  compose_deploy_data:

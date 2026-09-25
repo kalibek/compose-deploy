@@ -1,0 +1,26 @@
+# VCS / editor / OS noise
+**/.git
+**/.DS_Store
+**/.idea
+**/.vscode
+**/*.swp
+
+# Local secrets and data
+.env
+**/.env
+**/.env.*
+!.env.example
+**/*.db
+**/*.db-*
+**/.data
+
+# Build outputs and dependencies (rebuilt inside the image)
+ui/node_modules
+ui/dist
+# The placeholder is replaced by the ui stage output, so it's not needed.
+api/web/dist
+
+# Not needed in the build
+docker-compose.yml
+README.md
+**/*.log

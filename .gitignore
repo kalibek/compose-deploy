@@ -1,0 +1,27 @@
+# Secrets / local config
+.env
+.env.*
+!.env.example
+
+# Build output
+ui/dist/
+api/web/dist/*
+!api/web/dist/index.html
+
+# Dependencies
+node_modules/
+
+# Local data
+*.db
+*.db-shm
+*.db-wal
+.data/
+
+# Editors / OS
+.idea/
+.vscode/
+*.iml
+.DS_Store
+
+# Logs
+*.log
