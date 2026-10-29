@@ -289,3 +289,7 @@ cd ui && npm install && npm run dev
 
 Checks: `cd api && go vet ./... && go test ./...`, `cd ui && npm run build && npm run lint`.
 The image build (`docker compose build`) embeds `ui/dist` into the Go binary.
+
+## License
+
+[MIT](LICENSE)
