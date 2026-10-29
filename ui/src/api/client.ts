@@ -2,6 +2,7 @@ import type {
   Container,
   CreateStackRequest,
   CreateStackResponse,
+  Deployment,
   QueuedResponse,
   Registry,
   RegistryRequest,
@@ -108,6 +109,9 @@ export const api = {
   stackStatus: (id: number | string) => request<StackStatusResponse>(`/stacks/${id}/status`),
   rotateWebhookSecret: (id: number | string) =>
     request<WebhookSecretResponse>(`/stacks/${id}/webhook-secret`, { method: 'POST' }),
+  listDeployments: (id: number | string) => request<Deployment[]>(`/stacks/${id}/deployments`),
+  getDeployment: (id: number | string, deploymentId: number) =>
+    request<Deployment>(`/stacks/${id}/deployments/${deploymentId}`),
 
   validateCompose: (body: ValidateComposeRequest) =>
     request<ValidateComposeResponse>('/compose/validate', { method: 'POST', body }),

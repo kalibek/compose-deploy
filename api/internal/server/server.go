@@ -25,8 +25,8 @@ import (
 
 // Deployer is the subset of deployer.Deployer used by handlers.
 type Deployer interface {
-	Enqueue(id int64, force bool)
-	EnqueueSHA(id int64, sha string)
+	Enqueue(id int64, force bool, c db.Cause)
+	EnqueueSHA(id int64, sha string, c db.Cause)
 	Stop(id int64)
 	Down(ctx context.Context, st *db.Stack) error
 	ValidateCompose(ctx context.Context, content string, env map[string]string) (string, error)
@@ -120,6 +120,8 @@ func (s *Server) Handler() http.Handler {
 			r.Post("/stacks/{id}/stop", s.stopStack)
 			r.Get("/stacks/{id}/status", s.stackStatus)
 			r.Post("/stacks/{id}/webhook-secret", s.rotateWebhookSecret)
+			r.Get("/stacks/{id}/deployments", s.listDeployments)
+			r.Get("/stacks/{id}/deployments/{did}", s.getDeployment)
 			r.Post("/compose/validate", s.validateCompose)
 			r.Get("/stacks/{id}/containers", s.listContainers)
 			r.Get("/stacks/{id}/containers/{cid}/logs", s.containerLogs)

@@ -332,7 +332,7 @@ func (s *Server) createStack(w http.ResponseWriter, r *http.Request) {
 	}
 	s.log.Info("stack created", "stack", st.Name, "id", st.ID, "source", st.Source)
 	if st.Source == db.SourceInline && st.AutoDeploy {
-		s.dep.Enqueue(st.ID, false) // nothing to poll: deploy right away
+		s.dep.Enqueue(st.ID, false, db.Cause{By: db.ByConfig, Detail: "stack created"}) // nothing to poll: deploy right away
 	}
 	httpx.WriteJSON(w, http.StatusCreated, map[string]any{
 		"stack":          s.toStackResponse(st),
@@ -478,7 +478,7 @@ func (s *Server) updateStack(w http.ResponseWriter, r *http.Request) {
 	// Inline stacks have nothing to poll: saving a changed file is the trigger.
 	if contentChanged && st.AutoDeploy && st.Status != db.StatusStopped {
 		s.log.Info("inline compose file changed, deploy queued", "stack", st.Name)
-		s.dep.Enqueue(st.ID, false)
+		s.dep.Enqueue(st.ID, false, db.Cause{By: db.ByConfig, Detail: "compose file saved"})
 	}
 	httpx.WriteJSON(w, http.StatusOK, s.toStackResponse(st))
 }
@@ -567,7 +567,7 @@ func (s *Server) deployStack(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	s.dep.Enqueue(st.ID, true)
+	s.dep.Enqueue(st.ID, true, db.Cause{By: db.ByManual})
 	httpx.WriteJSON(w, http.StatusAccepted, map[string]string{"status": db.StatusQueued})
 }
 

@@ -89,6 +89,26 @@ export interface StackStatusResponse {
   last_error: string
 }
 
+/** What caused a deployment: the Deploy/Stop button, a GitHub webhook, the poller or saving an inline compose file. */
+export type DeploymentTrigger = 'manual' | 'webhook' | 'poll' | 'config'
+
+export interface Deployment {
+  id: number
+  action: 'deploy' | 'stop'
+  triggered_by: DeploymentTrigger
+  /** E.g. "push to main", "workflow build succeeded". */
+  trigger_detail: string
+  /** "deploying" while the run is in progress. */
+  status: 'deploying' | 'success' | 'failed' | 'stopped'
+  /** Deployed commit (git) or compose file revision (inline); "" if unknown. */
+  sha: string
+  error: string
+  started_at: string
+  finished_at: string | null
+  /** Only returned by getDeployment. */
+  log?: string
+}
+
 export interface QueuedResponse {
   status: 'queued'
 }

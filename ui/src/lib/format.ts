@@ -23,6 +23,22 @@ export function absoluteTime(iso: string | null): string {
   return Number.isNaN(t) ? iso : new Date(t).toLocaleString()
 }
 
+/** "1m 05s"-style duration between two ISO timestamps ("" if unknown). */
+export function duration(fromIso: string, toIso: string | null): string {
+  if (!toIso) return ''
+  const ms = Date.parse(toIso) - Date.parse(fromIso)
+  if (Number.isNaN(ms) || ms < 0) return ''
+  const s = Math.round(ms / 1000)
+  if (s < 60) return `${s}s`
+  return `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s`
+}
+
+/** GitHub commit page for sha, or null for non-GitHub repositories. */
+export function commitUrl(repoUrl: string, sha: string): string | null {
+  if (!repoUrl.startsWith('https://github.com/') || !sha) return null
+  return `${repoUrl.replace(/\.git$/, '')}/commit/${sha}`
+}
+
 export const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,62}$/
 
 export function isBusy(status: string | undefined): boolean {

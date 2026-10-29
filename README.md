@@ -159,6 +159,22 @@ For each stack (compose **project name = stack name**), under `DATA_DIR/stacks/<
 Deploys of the same stack are serialized; the log of the last run is shown in the UI. *Stop* runs
 `docker compose down`; deleting a stack can optionally run `down` first.
 
+### Deployment history
+
+Every deploy and stop run is recorded in the stack's **Deployment history**: when it started, how long it
+took, what triggered it, the commit (or inline compose revision) it deployed, its outcome and its full log
+(click a row). Triggers are:
+
+| Trigger | Meaning |
+|---|---|
+| Manual | *Deploy now* / *Stop* in the UI |
+| Webhook | GitHub push, or successful workflow run(s), delivered by the webhook |
+| Poller | the poller saw a new commit on the branch (and, for workflow stacks, its workflow succeeded) |
+| Compose saved | an inline stack was created or its compose file was saved |
+
+The last 100 runs per stack are kept (`GET /api/stacks/{id}/deployments`, and
+`/api/stacks/{id}/deployments/{deploymentId}` for one run including its log). History is deleted with the stack.
+
 ### Containers, logs and shell
 
 The stack page lists the project's containers (`docker ps` filtered by the compose project label) with state,

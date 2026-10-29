@@ -28,18 +28,21 @@ type fakeDeployer struct {
 	mu       sync.Mutex
 	shas     []string
 	enqueued []int64
+	causes   []db.Cause
 	stopped  []int64
 	downs    []string
 }
 
-func (f *fakeDeployer) Enqueue(id int64, force bool) {
+func (f *fakeDeployer) Enqueue(id int64, force bool, c db.Cause) {
 	f.mu.Lock()
 	f.enqueued = append(f.enqueued, id)
+	f.causes = append(f.causes, c)
 	f.mu.Unlock()
 }
-func (f *fakeDeployer) EnqueueSHA(id int64, sha string) {
+func (f *fakeDeployer) EnqueueSHA(id int64, sha string, c db.Cause) {
 	f.mu.Lock()
 	f.shas = append(f.shas, sha)
+	f.causes = append(f.causes, c)
 	f.mu.Unlock()
 }
 func (f *fakeDeployer) ValidateCompose(ctx context.Context, content string, env map[string]string) (string, error) {
@@ -402,6 +405,9 @@ func TestWebhook(t *testing.T) {
 	}
 	if len(e.dep.enqueued) != 1 {
 		t.Fatalf("enqueued %v", e.dep.enqueued)
+	}
+	if c := e.dep.causes[0]; c.By != db.ByWebhook || c.Detail != "push to main" {
+		t.Fatalf("cause %+v", c)
 	}
 }
 

@@ -128,7 +128,7 @@ func TestDeployCommands(t *testing.T) {
 	dep, d, box, dataDir := setup(t, f)
 	st := createStack(t, d, box)
 
-	dep.Enqueue(st.ID, true)
+	dep.Enqueue(st.ID, true, db.Cause{})
 	got := waitStatus(t, d, st.ID, db.StatusSuccess, db.StatusFailed)
 	if got.Status != db.StatusSuccess {
 		t.Fatalf("status %s: %s\n%s", got.Status, got.LastError, got.LastLog)
@@ -228,7 +228,7 @@ func TestDeployFailureAndStop(t *testing.T) {
 	f := &fakeRunner{failOn: "pull"}
 	dep, d, box, _ := setup(t, f)
 	st := createStack(t, d, box)
-	dep.Enqueue(st.ID, true)
+	dep.Enqueue(st.ID, true, db.Cause{})
 	got := waitStatus(t, d, st.ID, db.StatusFailed, db.StatusSuccess)
 	if got.Status != db.StatusFailed || !strings.Contains(got.LastError, "compose pull") {
 		t.Fatalf("got %s %q", got.Status, got.LastError)
@@ -252,13 +252,13 @@ func TestDeployFailureAndStop(t *testing.T) {
 	f.mu.Lock()
 	f.cmds = nil
 	f.mu.Unlock()
-	dep.Enqueue(st.ID, false)
+	dep.Enqueue(st.ID, false, db.Cause{})
 	time.Sleep(100 * time.Millisecond)
 	if len(f.cmds) != 0 {
 		t.Fatal("auto deploy ran on stopped stack")
 	}
 	// manual deploy clears stopped
-	dep.Enqueue(st.ID, true)
+	dep.Enqueue(st.ID, true, db.Cause{})
 	waitStatus(t, d, st.ID, db.StatusSuccess)
 }
 
@@ -266,10 +266,10 @@ func TestCoalescing(t *testing.T) {
 	f := &fakeRunner{block: make(chan struct{})}
 	dep, d, box, _ := setup(t, f)
 	st := createStack(t, d, box)
-	dep.Enqueue(st.ID, true)
+	dep.Enqueue(st.ID, true, db.Cause{})
 	waitStatus(t, d, st.ID, db.StatusDeploying)
 	for i := 0; i < 5; i++ {
-		dep.Enqueue(st.ID, true)
+		dep.Enqueue(st.ID, true, db.Cause{})
 	}
 	close(f.block)
 	waitStatus(t, d, st.ID, db.StatusSuccess)
@@ -309,7 +309,7 @@ func TestDeployPinnedSHA(t *testing.T) {
 	st := createStack(t, d, box)
 	d.SetWaiting(context.Background(), st.ID, testSHA, "waiting for build")
 
-	dep.EnqueueSHA(st.ID, testSHA)
+	dep.EnqueueSHA(st.ID, testSHA, db.Cause{})
 	got := waitStatus(t, d, st.ID, db.StatusSuccess, db.StatusFailed)
 	if got.Status != db.StatusSuccess {
 		t.Fatalf("status %s: %s\n%s", got.Status, got.LastError, got.LastLog)
@@ -346,7 +346,7 @@ func TestDeployInline(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	dep.Enqueue(st.ID, false)
+	dep.Enqueue(st.ID, false, db.Cause{})
 	got := waitStatus(t, d, st.ID, db.StatusSuccess, db.StatusFailed)
 	if got.Status != db.StatusSuccess || got.LastSHA != ContentSHA(content) {
 		t.Fatalf("status %s sha %s: %s\n%s", got.Status, got.LastSHA, got.LastError, got.LastLog)
@@ -401,5 +401,60 @@ func TestValidateCompose(t *testing.T) {
 	}
 	if _, err := dep.ValidateCompose(context.Background(), " \n", nil); err == nil {
 		t.Fatal("expected empty-file error")
+	}
+}
+
+func TestDeploymentHistory(t *testing.T) {
+	f := &fakeRunner{failOn: "pull"}
+	dep, d, box, _ := setup(t, f)
+	st := createStack(t, d, box)
+	ctx := context.Background()
+
+	dep.Enqueue(st.ID, false, db.Cause{By: db.ByWebhook, Detail: "push to main"})
+	waitStatus(t, d, st.ID, db.StatusFailed)
+	f.mu.Lock()
+	f.failOn = ""
+	f.mu.Unlock()
+	dep.Stop(st.ID)
+	waitStatus(t, d, st.ID, db.StatusStopped)
+
+	list, err := d.ListDeployments(ctx, st.ID, 10)
+	if err != nil || len(list) != 2 {
+		t.Fatalf("list %d %v", len(list), err)
+	}
+	stop, deploy := list[0], list[1]
+	if stop.Action != db.ActionStop || stop.TriggeredBy != db.ByManual || stop.Status != db.StatusStopped || stop.FinishedAt == nil {
+		t.Fatalf("stop %+v", stop)
+	}
+	if deploy.Action != db.ActionDeploy || deploy.TriggeredBy != db.ByWebhook || deploy.TriggerDetail != "push to main" ||
+		deploy.Status != db.StatusFailed || deploy.SHA != testSHA || !strings.Contains(deploy.Error, "compose pull") {
+		t.Fatalf("deploy %+v", deploy)
+	}
+	full, _ := d.GetDeployment(ctx, st.ID, deploy.ID)
+	if !strings.Contains(full.Log, "deploy failed") || strings.Contains(full.Log, "ghp_SECRETTOKEN") {
+		t.Fatalf("log %q", full.Log)
+	}
+}
+
+func TestCoalescedManualDeployKeepsCause(t *testing.T) {
+	f := &fakeRunner{block: make(chan struct{})}
+	dep, d, box, _ := setup(t, f)
+	st := createStack(t, d, box)
+	dep.Enqueue(st.ID, true, db.Cause{By: db.ByManual})
+	waitStatus(t, d, st.ID, db.StatusDeploying)
+	dep.Enqueue(st.ID, true, db.Cause{By: db.ByManual})
+	dep.Enqueue(st.ID, false, db.Cause{By: db.ByPoll})
+	close(f.block)
+	deadline := time.Now().Add(5 * time.Second)
+	var list []*db.Deployment
+	for time.Now().Before(deadline) {
+		list, _ = d.ListDeployments(context.Background(), st.ID, 10)
+		if len(list) == 2 && list[0].FinishedAt != nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(list) != 2 || list[0].TriggeredBy != db.ByManual {
+		t.Fatalf("got %d deployments, latest %+v", len(list), list[0])
 	}
 }

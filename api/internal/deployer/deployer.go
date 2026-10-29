@@ -38,6 +38,7 @@ type request struct {
 	kind  kind
 	force bool
 	sha   string // deploy this commit instead of the branch head ("" = head)
+	cause db.Cause
 }
 
 type queue struct {
@@ -112,19 +113,20 @@ func RepoDir(dataDir, name string) string { return filepath.Join(StackDir(dataDi
 
 // Enqueue schedules a deploy. force=true is a manual deploy (also clears
 // "stopped"); force=false is an automatic trigger and is dropped for stopped stacks.
-func (d *Deployer) Enqueue(id int64, force bool) {
-	d.submit(id, request{kind: kindDeploy, force: force})
+// c is recorded in the stack's deployment history.
+func (d *Deployer) Enqueue(id int64, force bool, c db.Cause) {
+	d.submit(id, request{kind: kindDeploy, force: force, cause: c})
 }
 
 // EnqueueSHA schedules an automatic deploy of a specific commit of the branch
 // (used when a commit's workflow succeeded; the head may have moved on since).
-func (d *Deployer) EnqueueSHA(id int64, sha string) {
-	d.submit(id, request{kind: kindDeploy, sha: sha})
+func (d *Deployer) EnqueueSHA(id int64, sha string, c db.Cause) {
+	d.submit(id, request{kind: kindDeploy, sha: sha, cause: c})
 }
 
 // Stop schedules `docker compose down`; the stack ends in status "stopped".
 func (d *Deployer) Stop(id int64) {
-	d.submit(id, request{kind: kindStop})
+	d.submit(id, request{kind: kindStop, cause: db.Cause{By: db.ByManual}})
 }
 
 // Shutdown cancels running operations and waits for workers to exit.
@@ -145,6 +147,9 @@ func (d *Deployer) submit(id int64, req request) {
 		d.queues[id] = q
 	}
 	if q.next != nil && req.kind == kindDeploy && q.next.kind == kindDeploy {
+		if q.next.force && !req.force {
+			req.cause = q.next.cause // a pending manual deploy stays attributed to the user
+		}
 		req.force = req.force || q.next.force
 	}
 	q.next = &req // latest intent wins
@@ -175,9 +180,9 @@ func (d *Deployer) worker(id int64, q *queue) {
 		d.mu.Unlock()
 		switch req.kind {
 		case kindDeploy:
-			d.execDeploy(id, req.force, req.sha)
+			d.execDeploy(id, req.force, req.sha, req.cause)
 		case kindStop:
-			d.execStop(id)
+			d.execStop(id, req.cause)
 		}
 	}
 }
@@ -195,8 +200,9 @@ func (d *Deployer) stackLock(id int64) *sync.Mutex {
 
 // ------------------------------------------------------------------ runs
 
-// flusher periodically writes partial logs to the DB until stop is called.
-func (d *Deployer) flusher(id int64, lb *logBuf) (stop func()) {
+// flusher periodically writes partial logs of the stack's running deployment
+// depID to the DB until stop is called.
+func (d *Deployer) flusher(id, depID int64, lb *logBuf) (stop func()) {
 	done := make(chan struct{})
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -210,8 +216,12 @@ func (d *Deployer) flusher(id int64, lb *logBuf) (stop func()) {
 				return
 			case <-t.C:
 				if lb.takeDirty() {
-					if err := d.db.SetStackLog(context.Background(), id, lb.String()); err != nil {
+					log := lb.String()
+					if err := d.db.SetStackLog(context.Background(), id, log); err != nil {
 						d.log.Warn("flush log", "stack_id", id, "err", err)
+					}
+					if err := d.db.SetDeploymentLog(context.Background(), depID, log); err != nil {
+						d.log.Warn("flush deployment log", "stack_id", id, "err", err)
 					}
 				}
 			}
@@ -235,7 +245,30 @@ func (d *Deployer) decryptEnv(enc string) (map[string]string, error) {
 	return env, nil
 }
 
-func (d *Deployer) execDeploy(id int64, force bool, target string) {
+// startDeployment records the start of a run in the stack's history. Failing
+// to record it is logged but doesn't block the run (depID 0 = not recorded).
+func (d *Deployer) startDeployment(log *slog.Logger, id int64, action, sha string, c db.Cause) int64 {
+	if c.By == "" {
+		c.By = db.ByManual
+	}
+	g := &db.Deployment{StackID: id, Action: action, TriggeredBy: c.By, TriggerDetail: c.Detail, SHA: sha}
+	if err := d.db.StartDeployment(context.Background(), g); err != nil {
+		log.Error("record deployment", "err", err)
+		return 0
+	}
+	return g.ID
+}
+
+func (d *Deployer) finishDeployment(log *slog.Logger, depID int64, p db.FinishParams) {
+	if depID == 0 {
+		return
+	}
+	if err := d.db.FinishDeployment(context.Background(), depID, p); err != nil {
+		log.Error("finish deployment", "err", err)
+	}
+}
+
+func (d *Deployer) execDeploy(id int64, force bool, target string, c db.Cause) {
 	lock := d.stackLock(id)
 	lock.Lock()
 	defer lock.Unlock()
@@ -252,14 +285,15 @@ func (d *Deployer) execDeploy(id int64, force bool, target string) {
 		return
 	}
 	log := d.log.With("stack", st.Name)
-	log.Info("deploy started", "force", force, "target", target)
+	log.Info("deploy started", "force", force, "target", target, "triggered_by", c.By)
 
 	if err := d.db.StartRun(bg, id, db.StatusDeploying); err != nil {
 		log.Error("start run", "err", err)
 		return
 	}
+	depID := d.startDeployment(log, id, db.ActionDeploy, target, c)
 	lb := newLogBuf()
-	stopFlush := d.flusher(id, lb)
+	stopFlush := d.flusher(id, depID, lb)
 
 	sha, err := d.deploy(d.ctx, st, target, lb)
 	stopFlush()
@@ -282,6 +316,7 @@ func (d *Deployer) execDeploy(id int64, force bool, target string) {
 	if err := d.db.FinishRun(bg, id, p); err != nil {
 		log.Error("finish run", "err", err)
 	}
+	d.finishDeployment(log, depID, p)
 }
 
 // deploy performs the actual work; it returns the synced sha (if sync
@@ -567,7 +602,7 @@ func origDockerConfigDir() string {
 	return ""
 }
 
-func (d *Deployer) execStop(id int64) {
+func (d *Deployer) execStop(id int64, c db.Cause) {
 	lock := d.stackLock(id)
 	lock.Lock()
 	defer lock.Unlock()
@@ -583,6 +618,7 @@ func (d *Deployer) execStop(id int64) {
 		log.Error("start run", "err", err)
 		return
 	}
+	depID := d.startDeployment(log, id, db.ActionStop, "", c)
 	lb := newLogBuf()
 	err = d.down(d.ctx, st, lb)
 	p := db.FinishParams{Status: db.StatusStopped}
@@ -599,6 +635,7 @@ func (d *Deployer) execStop(id int64) {
 	if err := d.db.FinishRun(bg, id, p); err != nil {
 		log.Error("finish run", "err", err)
 	}
+	d.finishDeployment(log, depID, p)
 }
 
 // Down runs `docker compose down` for st synchronously (used before delete).

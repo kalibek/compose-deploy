@@ -100,7 +100,7 @@ func (s *Server) githubWebhook(w http.ResponseWriter, r *http.Request) {
 		}
 		if payload.Ref == "refs/heads/"+st.Branch && st.AutoDeploy && st.Status != db.StatusStopped {
 			s.log.Info("webhook: push received, deploy queued", "stack", st.Name)
-			s.dep.Enqueue(st.ID, false)
+			s.dep.Enqueue(st.ID, false, db.Cause{By: db.ByWebhook, Detail: "push to " + st.Branch})
 			httpx.WriteJSON(w, http.StatusAccepted, map[string]string{"status": db.StatusQueued})
 			return
 		}
@@ -165,7 +165,7 @@ func (s *Server) workflowRunHook(w http.ResponseWriter, st *db.Stack, body []byt
 	}
 	if st.WorkflowName != "" {
 		s.log.Info("webhook: workflow succeeded, deploy queued", "stack", st.Name, "workflow", run.Name, "sha", run.HeadSHA)
-		s.dep.EnqueueSHA(st.ID, run.HeadSHA)
+		s.dep.EnqueueSHA(st.ID, run.HeadSHA, db.Cause{By: db.ByWebhook, Detail: "workflow " + run.Name + " succeeded"})
 		httpx.WriteJSON(w, http.StatusAccepted, map[string]string{"status": db.StatusQueued})
 		return
 	}
@@ -186,7 +186,7 @@ func (s *Server) workflowRunHook(w http.ResponseWriter, st *db.Stack, body []byt
 			s.db.SetWaiting(cctx, st.ID, sha, err.Error())
 		case res.State == github.StateSuccess:
 			s.log.Info("webhook: all workflows succeeded, deploy queued", "stack", st.Name, "sha", sha)
-			s.dep.EnqueueSHA(st.ID, sha)
+			s.dep.EnqueueSHA(st.ID, sha, db.Cause{By: db.ByWebhook, Detail: "all workflows succeeded"})
 		default:
 			s.db.SetWaiting(cctx, st.ID, sha, res.Detail)
 		}

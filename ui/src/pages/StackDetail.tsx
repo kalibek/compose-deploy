@@ -3,10 +3,11 @@ import { Link, useNavigate, useParams } from 'react-router'
 import { api, errorMessage } from '../api/client'
 import ConfirmButton from '../components/ConfirmButton'
 import ContainersSection from '../components/ContainersSection'
+import DeploymentsSection from '../components/DeploymentsSection'
 import LogViewer from '../components/LogViewer'
 import StatusBadge from '../components/StatusBadge'
 import WebhookSetup from '../components/WebhookSetup'
-import { absoluteTime, isBusy, relativeTime, shortSha } from '../lib/format'
+import { absoluteTime, commitUrl, isBusy, relativeTime, shortSha } from '../lib/format'
 import { usePolling } from '../lib/usePolling'
 import {
   btnDanger,
@@ -114,6 +115,7 @@ export default function StackDetail() {
   const lastError = st?.last_error ?? stack.last_error
   const busy = isBusy(status)
   const inline = stack.source === 'inline'
+  const lastCommitUrl = commitUrl(stack.repo_url, lastSha)
 
   return (
     <div className="space-y-4">
@@ -240,9 +242,9 @@ export default function StackDetail() {
                   <code className={code} title={lastSha}>
                     {shortSha(lastSha)}
                   </code>
-                  {stack.repo_url.startsWith('https://github.com/') && (
+                  {lastCommitUrl && (
                     <a
-                      href={`${stack.repo_url.replace(/\.git$/, '')}/commit/${lastSha}`}
+                      href={lastCommitUrl}
                       target="_blank"
                       rel="noreferrer"
                       className={`${link} text-xs`}
@@ -285,6 +287,8 @@ export default function StackDetail() {
         </div>
         <LogViewer text={st?.last_log ?? ''} />
       </section>
+
+      <DeploymentsSection stack={stack} fast={busy} />
 
       {inline && (
         <section className={card}>

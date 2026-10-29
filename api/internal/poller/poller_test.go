@@ -27,8 +27,8 @@ type fakeDeployer struct {
 	shas  []string
 }
 
-func (f *fakeDeployer) Enqueue(id int64, force bool)    { f.heads = append(f.heads, id) }
-func (f *fakeDeployer) EnqueueSHA(id int64, sha string) { f.shas = append(f.shas, sha) }
+func (f *fakeDeployer) Enqueue(id int64, force bool, c db.Cause)    { f.heads = append(f.heads, id) }
+func (f *fakeDeployer) EnqueueSHA(id int64, sha string, c db.Cause) { f.shas = append(f.shas, sha) }
 
 type fakeChecker struct {
 	res  github.Result

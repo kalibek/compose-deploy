@@ -347,14 +347,148 @@ func (d *DB) FinishRun(ctx context.Context, id int64, p FinishParams) error {
 	return err
 }
 
-// MarkInterrupted flips stacks left in queued/deploying (e.g. after a crash) to failed.
+// MarkInterrupted flips stacks left in queued/deploying (e.g. after a crash) to
+// failed, and closes their unfinished deployment records.
 func (d *DB) MarkInterrupted(ctx context.Context) (int64, error) {
+	if _, err := d.sql.ExecContext(ctx, `UPDATE deployments SET status = ?, error = 'interrupted by restart',
+		finished_at = ? WHERE finished_at IS NULL`, StatusFailed, ts(d.now())); err != nil {
+		return 0, err
+	}
 	res, err := d.sql.ExecContext(ctx, `UPDATE stacks SET status = ?, last_error = 'interrupted by restart'
 		WHERE status IN (?, ?)`, StatusFailed, StatusQueued, StatusDeploying)
 	if err != nil {
 		return 0, err
 	}
 	return res.RowsAffected()
+}
+
+// ------------------------------------------------------------ deployments
+
+// Deployment actions.
+const (
+	ActionDeploy = "deploy"
+	ActionStop   = "stop"
+)
+
+// What triggered a deployment.
+const (
+	ByManual  = "manual"  // Deploy / Stop button in the UI
+	ByWebhook = "webhook" // GitHub push or workflow_run webhook
+	ByPoll    = "poll"    // the poller saw a new commit (and its workflow succeeded)
+	ByConfig  = "config"  // inline stack created or its compose file saved
+)
+
+// Cause describes what triggered a deployment.
+type Cause struct {
+	By     string // By*
+	Detail string // human readable, e.g. "push to main"
+}
+
+// MaxDeployments is how many deployment records are kept per stack.
+const MaxDeployments = 100
+
+type Deployment struct {
+	ID            int64
+	StackID       int64
+	Action        string // Action*
+	TriggeredBy   string // By*
+	TriggerDetail string
+	Status        string // StatusDeploying while running, then StatusSuccess | StatusFailed | StatusStopped
+	SHA           string
+	Error         string
+	Log           string // only filled by GetDeployment
+	StartedAt     time.Time
+	FinishedAt    *time.Time
+}
+
+const deploymentCols = `id, stack_id, action, triggered_by, trigger_detail, status, sha, error, started_at, finished_at`
+
+func scanDeployment(r scanner, extra ...any) (*Deployment, error) {
+	var g Deployment
+	var started string
+	var finished sql.NullString
+	dest := append([]any{&g.ID, &g.StackID, &g.Action, &g.TriggeredBy, &g.TriggerDetail, &g.Status, &g.SHA,
+		&g.Error, &started, &finished}, extra...)
+	if err := r.Scan(dest...); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	g.StartedAt = parseTS(started)
+	if finished.Valid && finished.String != "" {
+		t := parseTS(finished.String)
+		g.FinishedAt = &t
+	}
+	return &g, nil
+}
+
+// StartDeployment records a run that is starting and prunes old records of
+// the stack beyond MaxDeployments. It fills g.ID, g.Status and g.StartedAt.
+func (d *DB) StartDeployment(ctx context.Context, g *Deployment) error {
+	now := d.now()
+	g.Status = StatusDeploying
+	res, err := d.sql.ExecContext(ctx, `INSERT INTO deployments
+		(stack_id, action, triggered_by, trigger_detail, status, sha, started_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		g.StackID, g.Action, g.TriggeredBy, g.TriggerDetail, g.Status, g.SHA, ts(now))
+	if err != nil {
+		return err
+	}
+	g.ID, _ = res.LastInsertId()
+	g.StartedAt = parseTS(ts(now))
+	_, err = d.sql.ExecContext(ctx, `DELETE FROM deployments WHERE stack_id = ? AND id NOT IN
+		(SELECT id FROM deployments WHERE stack_id = ? ORDER BY id DESC LIMIT ?)`, g.StackID, g.StackID, MaxDeployments)
+	return err
+}
+
+func (d *DB) SetDeploymentLog(ctx context.Context, id int64, log string) error {
+	_, err := d.sql.ExecContext(ctx, `UPDATE deployments SET log = ? WHERE id = ?`, log, id)
+	return err
+}
+
+// FinishDeployment stores the outcome of a run (p.SHA nil = leave sha unchanged).
+func (d *DB) FinishDeployment(ctx context.Context, id int64, p FinishParams) error {
+	q := `UPDATE deployments SET status = ?, error = ?, log = ?, finished_at = ?`
+	args := []any{p.Status, p.Error, p.Log, ts(d.now())}
+	if p.SHA != nil {
+		q += `, sha = ?`
+		args = append(args, *p.SHA)
+	}
+	q += ` WHERE id = ?`
+	args = append(args, id)
+	_, err := d.sql.ExecContext(ctx, q, args...)
+	return err
+}
+
+// ListDeployments returns the stack's deployments, newest first, without logs.
+func (d *DB) ListDeployments(ctx context.Context, stackID int64, limit int) ([]*Deployment, error) {
+	rows, err := d.sql.QueryContext(ctx, `SELECT `+deploymentCols+` FROM deployments WHERE stack_id = ?
+		ORDER BY id DESC LIMIT ?`, stackID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []*Deployment{}
+	for rows.Next() {
+		g, err := scanDeployment(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, g)
+	}
+	return out, rows.Err()
+}
+
+// GetDeployment returns one deployment of the stack, including its log.
+func (d *DB) GetDeployment(ctx context.Context, stackID, id int64) (*Deployment, error) {
+	var log string
+	g, err := scanDeployment(d.sql.QueryRowContext(ctx, `SELECT `+deploymentCols+`, log FROM deployments
+		WHERE stack_id = ? AND id = ?`, stackID, id), &log)
+	if err != nil {
+		return nil, err
+	}
+	g.Log = log
+	return g, nil
 }
 
 // ------------------------------------------------------------- registries

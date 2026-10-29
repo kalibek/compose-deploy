@@ -19,8 +19,8 @@ type LsRemoter interface {
 }
 
 type Enqueuer interface {
-	Enqueue(id int64, force bool)
-	EnqueueSHA(id int64, sha string)
+	Enqueue(id int64, force bool, c db.Cause)
+	EnqueueSHA(id int64, sha string, c db.Cause)
 }
 
 // WorkflowChecker reports the GitHub Actions state of a commit.
@@ -107,7 +107,7 @@ func (p *Poller) Tick(ctx context.Context, log *slog.Logger) {
 		}
 		if st.DeployTrigger != db.TriggerWorkflow {
 			log.Info("poller: new commit", "stack", st.Name, "sha", sha, "last_sha", st.LastSHA)
-			p.Deployer.Enqueue(st.ID, false)
+			p.Deployer.Enqueue(st.ID, false, db.Cause{By: db.ByPoll, Detail: "new commit on " + st.Branch})
 			continue
 		}
 		cctx, cancel = context.WithTimeout(ctx, 60*time.Second)
@@ -120,11 +120,19 @@ func (p *Poller) Tick(ctx context.Context, log *slog.Logger) {
 		}
 		if res.State == github.StateSuccess {
 			log.Info("poller: workflow succeeded, deploying", "stack", st.Name, "sha", sha)
-			p.Deployer.EnqueueSHA(st.ID, sha)
+			p.Deployer.EnqueueSHA(st.ID, sha, db.Cause{By: db.ByPoll, Detail: workflowDetail(st.WorkflowName)})
 			continue
 		}
 		p.setWaiting(ctx, log, st, sha, res.Detail)
 	}
+}
+
+// workflowDetail describes a deploy caused by succeeded workflow run(s).
+func workflowDetail(name string) string {
+	if name == "" {
+		return "all workflows succeeded"
+	}
+	return "workflow " + name + " succeeded"
 }
 
 // setWaiting stores the waiting state when it changed.
