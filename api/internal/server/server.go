@@ -54,6 +54,8 @@ type Options struct {
 	// by the login rate limiter and logs). Only enable behind a reverse proxy
 	// that overwrites these headers, otherwise clients can spoof them.
 	TrustProxy bool
+	// DockerCommand is the container CLI binary, e.g. docker or podman.
+	DockerCommand string
 }
 
 type Server struct {
@@ -80,9 +82,13 @@ func New(o Options) *Server {
 	if o.Runner == nil {
 		o.Runner = runner.Exec{}
 	}
+	ctr := &containers.Client{Runner: o.Runner, DockerCommand: o.DockerCommand}
 	return &Server{
 		db: o.DB, box: o.Box, auth: o.Auth, dep: o.Deployer, dataDir: o.DataDir, static: o.Static, log: o.Logger, proxy: o.TrustProxy,
-		ctr: &containers.Client{Runner: o.Runner}, shell: startDockerShell, workflows: o.Workflows,
+		ctr: ctr, workflows: o.Workflows,
+		shell: func(ctx context.Context, id string, cols, rows uint16) (shellSession, error) {
+			return ctr.StartShell(ctx, id, cols, rows)
+		},
 	}
 }
 

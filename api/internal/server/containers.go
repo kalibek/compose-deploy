@@ -27,10 +27,6 @@ type shellSession interface {
 	Close() error
 }
 
-func startDockerShell(ctx context.Context, id string, cols, rows uint16) (shellSession, error) {
-	return containers.StartShell(ctx, id, cols, rows)
-}
-
 func (s *Server) listContainers(w http.ResponseWriter, r *http.Request) {
 	st, ok := s.loadStack(w, r)
 	if !ok {

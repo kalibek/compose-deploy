@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/compose-deploy/api/internal/crypto"
 	"github.com/compose-deploy/api/internal/db"
@@ -96,5 +97,62 @@ func TestWorkflowTriggerWaitsThenDeploysCommit(t *testing.T) {
 	p.Tick(ctx, slog.Default())
 	if st, _ := d.GetStack(ctx, id); st.WaitingSHA != "" {
 		t.Fatalf("waiting not cleared: %+v", st)
+	}
+}
+
+func TestFailedWorkflowBacksOff(t *testing.T) {
+	p, d, dep, chk, id := setup(t, db.TriggerWorkflow)
+	ctx := context.Background()
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	p.Now = func() time.Time { return now }
+	p.Interval = time.Minute
+	tick := func(after time.Duration) {
+		now = now.Add(after)
+		p.Tick(ctx, slog.Default())
+	}
+
+	chk.res = github.Result{State: github.StateFailed, Detail: "workflow failed: build (failure)"}
+	tick(0)
+	if len(chk.args) != 1 {
+		t.Fatalf("first check: %v", chk.args)
+	}
+	if st, _ := d.GetStack(ctx, id); st.WaitingSHA != newSHA || st.WaitingReason != chk.res.Detail {
+		t.Fatalf("waiting state: %+v", st)
+	}
+
+	// backoff doubles from the interval: next checks after 2m, then 4m
+	tick(time.Minute)
+	if len(chk.args) != 1 {
+		t.Fatalf("checked during backoff: %v", chk.args)
+	}
+	tick(time.Minute)
+	if len(chk.args) != 2 {
+		t.Fatalf("not re-checked after 2m: %v", chk.args)
+	}
+	tick(3 * time.Minute)
+	if len(chk.args) != 2 {
+		t.Fatalf("checked during 4m backoff: %v", chk.args)
+	}
+	tick(time.Minute)
+	if len(chk.args) != 3 {
+		t.Fatalf("not re-checked after 4m: %v", chk.args)
+	}
+
+	// a re-run that succeeds deploys once it's checked
+	chk.res = github.Result{State: github.StateSuccess}
+	tick(8 * time.Minute)
+	if len(dep.shas) != 1 || dep.shas[0] != newSHA {
+		t.Fatalf("success after backoff: shas %v", dep.shas)
+	}
+
+	// a new commit is checked right away, regardless of the old backoff
+	chk.res = github.Result{State: github.StateFailed, Detail: "workflow failed"}
+	d.FinishRun(ctx, id, db.FinishParams{Status: db.StatusSuccess, SHA: ptr(oldSHA)})
+	tick(0)
+	n := len(chk.args)
+	p.Git = fakeGit{"3333333333333333333333333333333333333333"}
+	tick(0)
+	if len(chk.args) != n+1 {
+		t.Fatalf("new commit not checked immediately: %v", chk.args)
 	}
 }

@@ -493,6 +493,7 @@ type validateComposeRequest struct {
 }
 
 // validateCompose checks a draft compose file with `docker compose config`.
+// The output is empty when the file is valid; otherwise it holds the error.
 func (s *Server) validateCompose(w http.ResponseWriter, r *http.Request) {
 	var req validateComposeRequest
 	if err := httpx.DecodeJSON(w, r, &req); err != nil {

@@ -47,13 +47,14 @@ type queue struct {
 }
 
 type Options struct {
-	DB         *db.DB
-	Box        *crypto.Box
-	Runner     runner.Runner
-	DataDir    string
-	CmdTimeout time.Duration // per command, default 15m
-	FlushEvery time.Duration // partial log flush interval, default 1s
-	Logger     *slog.Logger
+	DB            *db.DB
+	Box           *crypto.Box
+	Runner        runner.Runner
+	DataDir       string
+	CmdTimeout    time.Duration // per command, default 15m
+	FlushEvery    time.Duration // partial log flush interval, default 1s
+	Logger        *slog.Logger
+	DockerCommand string // container CLI binary, e.g. docker or podman
 }
 
 type Deployer struct {
@@ -70,9 +71,10 @@ type Deployer struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 
-	mu     sync.Mutex
-	queues map[int64]*queue
-	locks  map[int64]*sync.Mutex
+	mu            sync.Mutex
+	queues        map[int64]*queue
+	locks         map[int64]*sync.Mutex
+	dockerCommand string
 }
 
 func New(o Options) *Deployer {
@@ -87,18 +89,19 @@ func New(o Options) *Deployer {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Deployer{
-		db:         o.DB,
-		box:        o.Box,
-		run:        o.Runner,
-		git:        &gitops.Git{Runner: o.Runner, Timeout: o.CmdTimeout},
-		dataDir:    o.DataDir,
-		cmdTimeout: o.CmdTimeout,
-		flushEvery: o.FlushEvery,
-		log:        o.Logger,
-		ctx:        ctx,
-		cancel:     cancel,
-		queues:     map[int64]*queue{},
-		locks:      map[int64]*sync.Mutex{},
+		db:            o.DB,
+		box:           o.Box,
+		run:           o.Runner,
+		git:           &gitops.Git{Runner: o.Runner, Timeout: o.CmdTimeout},
+		dataDir:       o.DataDir,
+		cmdTimeout:    o.CmdTimeout,
+		flushEvery:    o.FlushEvery,
+		log:           o.Logger,
+		ctx:           ctx,
+		cancel:        cancel,
+		queues:        map[int64]*queue{},
+		locks:         map[int64]*sync.Mutex{},
+		dockerCommand: o.DockerCommand,
 	}
 }
 
@@ -371,7 +374,7 @@ func (d *Deployer) deploy(ctx context.Context, st *db.Stack, target string, lb *
 	defer cleanup()
 
 	cenv = append([]string{"DOCKER_CONFIG=" + dockerCfg}, cenv...)
-	base := composeBase(st.Name, composeFile, projDir)
+	base := composeBase(st.Name, composeFile)
 	steps := [][]string{
 		append(append([]string{}, base...), "down", "--remove-orphans"),
 		append(append([]string{}, base...), "pull"),
@@ -424,20 +427,25 @@ func commitEnv(sha string) []string {
 	return []string{"COMMIT_SHA=" + sha, "COMMIT_SHORT_SHA=" + sha[:7]}
 }
 
-func composeBase(project, composeFile, projDir string) []string {
-	return []string{"compose", "-p", project, "-f", composeFile, "--project-directory", projDir}
+// composeBase returns the global compose flags, restricted to ones that docker
+// and podman accept. There is no --project-directory: compose defaults the
+// project directory to the directory of the first -f file, so callers must run
+// the command with Dir set to that same directory (and keep the compose file
+// and its .env there).
+func composeBase(project, composeFile string) []string {
+	return []string{"compose", "-p", project, "-f", composeFile}
 }
 
 func (d *Deployer) docker(ctx context.Context, dir string, env []string, out io.Writer, args []string) error {
-	fmt.Fprintf(out, "\n$ docker %s\n", strings.Join(args, " "))
+	fmt.Fprintf(out, "\n$ %s %s\n", d.dockerCommand, strings.Join(args, " "))
 	cctx, cancel := context.WithTimeout(ctx, d.cmdTimeout)
 	defer cancel()
-	err := d.run.Run(cctx, runner.Cmd{Name: "docker", Args: args, Dir: dir, Env: env}, out)
+	err := d.run.Run(cctx, runner.Cmd{Name: d.dockerCommand, Args: args, Dir: dir, Env: env}, out)
 	if err != nil {
 		if cctx.Err() == context.DeadlineExceeded {
-			return fmt.Errorf("docker %s: timed out after %s", stepName(args), d.cmdTimeout)
+			return fmt.Errorf("%s %s: timed out after %s", d.dockerCommand, stepName(args), d.cmdTimeout)
 		}
-		return fmt.Errorf("docker %s: %w", stepName(args), err)
+		return fmt.Errorf("%s %s: %w", d.dockerCommand, stepName(args), err)
 	}
 	return nil
 }
@@ -655,11 +663,11 @@ func (d *Deployer) down(ctx context.Context, st *db.Stack, out io.Writer) error 
 		projDir := InlineDir(d.dataDir, st.Name)
 		file := filepath.Join(projDir, InlineFile)
 		if _, err := os.Stat(file); err == nil {
-			args = append(composeBase(st.Name, file, projDir), "down", "--remove-orphans")
+			args = append(composeBase(st.Name, file), "down", "--remove-orphans")
 			dir = projDir
 		}
 	} else if file, projDir, err := resolveCompose(RepoDir(d.dataDir, st.Name), st.ComposePath); err == nil {
-		args = append(composeBase(st.Name, file, projDir), "down", "--remove-orphans")
+		args = append(composeBase(st.Name, file), "down", "--remove-orphans")
 		dir = projDir
 		// Same interpolation as at deploy time (e.g. ${COMMIT_SHA:?} must resolve).
 		env = commitEnv(st.LastSHA)
@@ -667,9 +675,11 @@ func (d *Deployer) down(ctx context.Context, st *db.Stack, out io.Writer) error 
 	return d.docker(ctx, dir, env, out, args)
 }
 
-// ValidateCompose runs `docker compose config --quiet` on a draft compose file
-// (with the given env written to .env, as at deploy time). It returns the
-// command output; err is non-nil when the file is invalid or docker failed.
+// ValidateCompose runs `docker compose config` on a draft compose file (with
+// the given env written to .env, as at deploy time) and relies on the exit
+// code (--quiet is not portable to podman). On success the output is empty,
+// since `config` prints the interpolated file, which may contain secrets. On
+// failure it returns the scrubbed message and a non-nil error.
 func (d *Deployer) ValidateCompose(ctx context.Context, content string, env map[string]string) (string, error) {
 	if strings.TrimSpace(content) == "" {
 		return "", errors.New("the compose file is empty")
@@ -695,8 +705,8 @@ func (d *Deployer) ValidateCompose(ctx context.Context, content string, env map[
 	var out bytes.Buffer
 	cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	args := []string{"compose", "-p", "validate", "-f", file, "--project-directory", dir, "config", "--quiet"}
-	err = d.run.Run(cctx, runner.Cmd{Name: "docker", Args: args, Dir: dir}, &out)
+	args := []string{"compose", "-p", "validate", "-f", file, "config"}
+	err = d.run.Run(cctx, runner.Cmd{Name: d.dockerCommand, Args: args, Dir: dir}, &out)
 	// Don't leak the temp path into messages shown in the UI.
 	msg := strings.ReplaceAll(out.String(), dir+string(filepath.Separator), "")
 	msg = strings.TrimSpace(strings.ReplaceAll(msg, dir, "."))
@@ -706,5 +716,5 @@ func (d *Deployer) ValidateCompose(ctx context.Context, content string, env map[
 		}
 		return msg, errors.New(msg)
 	}
-	return msg, nil
+	return "", nil
 }

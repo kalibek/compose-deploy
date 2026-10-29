@@ -10,10 +10,13 @@ SQLite storage, single admin password.
 ```sh
 cp .env.example .env
 # edit .env: set ADMIN_PASSWORD and APP_SECRET (e.g. `openssl rand -hex 32`)
-docker compose up -d --build
+docker compose up -d
 ```
 
 Open `http://<host>:3000` and log in with `ADMIN_PASSWORD`.
+
+The compose file pulls the prebuilt image `kalibek/compose-deploy:latest` from Docker Hub (published on every
+push to `main`). To build from source instead, swap `image:` for the commented `build:` block.
 
 The compose file reads `ADMIN_PASSWORD` / `APP_SECRET` from `.env` (`${ADMIN_PASSWORD:?...}` fails fast if
 unset). You can also inline them directly in `docker-compose.yml` under `environment:` if you prefer.
@@ -102,7 +105,9 @@ option to **After its GitHub Actions workflow succeeds**:
 - The poller sees the new commit, then asks the GitHub API about the commit's workflow runs, and waits
   (the stack shows *waiting for CI* and why) until they finished. Only a successful run is deployed, and it
   deploys **exactly that commit**, even if the branch has moved on since. Failed or cancelled runs aren't
-  deployed; a later re-run that succeeds is.
+  deployed; a later re-run that succeeds is. After a failure the poller re-checks that commit with
+  exponential backoff (2× the poll interval, doubling up to 30 minutes) instead of on every tick, so a
+  successful re-run may take that long to be picked up without a webhook. A new commit is checked right away.
 - Optionally name the workflow that builds the images (`build` or `build.yml`); otherwise *every* workflow
   run of the commit must succeed. Pull-request runs are ignored.
 - The token needs **Actions: Read-only** in addition to *Contents: Read-only*. Public repos work without a
@@ -155,6 +160,9 @@ For each stack (compose **project name = stack name**), under `DATA_DIR/stacks/<
 3. `docker compose down --remove-orphans`
 4. `docker compose pull`
 5. `docker compose up -d --remove-orphans`
+
+Only compose flags common to docker and podman (`-p`, `-f`) are used. Every command runs in the compose
+file's directory, so relative paths, `.env` and `${VAR}` substitution resolve there.
 
 Deploys of the same stack are serialized; the log of the last run is shown in the UI. *Stop* runs
 `docker compose down`; deleting a stack can optionally run `down` first.
@@ -225,7 +233,7 @@ compose-deploy talks to the engine through the Docker API socket, which Podman p
 - **SELinux.** The machine VM (Fedora CoreOS) enforces SELinux, which blocks containers from using host
   sockets. `docker-compose.yml` sets `security_opt: [label=disable]` for this; keep it.
 
-Start it with `podman compose up -d --build` (or `docker compose` pointed at the Podman socket). Check the
+Start it with `podman compose up -d` (or `docker compose` pointed at the Podman socket). Check the
 connection with `podman exec <container> docker version` — the server should report Podman.
 
 Other notes:
@@ -264,6 +272,7 @@ Other notes:
 | `POLL_INTERVAL` | `60s` | How often to check branches (Go duration, min `1s`). |
 | `COOKIE_SECURE` | `false` | Set `true` when served over HTTPS. |
 | `TRUST_PROXY` | `false` | Use `X-Forwarded-For`/`X-Real-IP` for the client IP (only behind a proxy). |
+| `DOCKER_COMMAND` | `docker` | Container CLI binary used for `compose`, `ps`, `logs` and `exec` (e.g. `podman`). Must be installed in the image. |
 | `DOCKER_SOCK` | `/var/run/docker.sock` | *Compose file only*: engine socket path on the engine host, mounted into the container (see *Podman*). |
 
 ## Local development

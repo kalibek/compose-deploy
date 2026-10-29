@@ -87,7 +87,7 @@ func setup(t *testing.T, f *fakeRunner) (*Deployer, *db.DB, *crypto.Box, string)
 	}
 	t.Cleanup(func() { d.Close() })
 	box, _ := crypto.New("secret")
-	dep := New(Options{DB: d, Box: box, Runner: f, DataDir: dir, FlushEvery: 10 * time.Millisecond})
+	dep := New(Options{DB: d, Box: box, Runner: f, DataDir: dir, FlushEvery: 10 * time.Millisecond, DockerCommand: "docker"})
 	t.Cleanup(dep.Shutdown)
 	return dep, d, box, dir
 }
@@ -140,7 +140,7 @@ func TestDeployCommands(t *testing.T) {
 	repo := filepath.Join(dataDir, "stacks", "app", "repo")
 	composeFile := filepath.Join(repo, "deploy", "compose.yml")
 	projDir := filepath.Join(repo, "deploy")
-	base := []string{"compose", "-p", "app", "-f", composeFile, "--project-directory", projDir}
+	base := []string{"compose", "-p", "app", "-f", composeFile}
 	want := []struct {
 		name string
 		args []string
@@ -163,6 +163,9 @@ func TestDeployCommands(t *testing.T) {
 		for _, a := range c.Args {
 			if strings.Contains(a, "ghp_SECRETTOKEN") || strings.Contains(a, basic) {
 				t.Errorf("token in args of cmd %d", i)
+			}
+			if a == "--project-directory" {
+				t.Errorf("non-portable --project-directory in cmd %d", i)
 			}
 		}
 		env := strings.Join(c.Env, "\n")
@@ -246,6 +249,12 @@ func TestDeployFailureAndStop(t *testing.T) {
 	last := f.cmds[len(f.cmds)-1]
 	if last.Args[len(last.Args)-2] != "down" {
 		t.Fatalf("stop ran %v", last.Args)
+	}
+	if strings.Contains(strings.Join(last.Args, " "), "--project-directory") {
+		t.Fatalf("stop must not use --project-directory: %v", last.Args)
+	}
+	if len(last.Args) != 7 || last.Args[0] != "compose" || last.Args[1] != "-p" || last.Args[3] != "-f" || last.Args[6] != "--remove-orphans" {
+		t.Fatalf("stop args = %v", last.Args)
 	}
 
 	// automatic deploy on stopped stack is ignored
@@ -359,7 +368,7 @@ func TestDeployInline(t *testing.T) {
 	if b, _ := os.ReadFile(filepath.Join(projDir, ".env")); !strings.Contains(string(b), "A=") {
 		t.Fatalf(".env = %q", b)
 	}
-	base := strings.Join([]string{"compose", "-p", "web", "-f", file, "--project-directory", projDir}, " ")
+	base := strings.Join([]string{"compose", "-p", "web", "-f", file}, " ")
 	var cmds []string
 	for _, c := range f.cmds {
 		cmds = append(cmds, c.Name+" "+strings.Join(c.Args, " "))
@@ -388,8 +397,12 @@ func TestValidateCompose(t *testing.T) {
 	if err != nil {
 		t.Fatalf("%q %v", out, err)
 	}
+	if out != "" {
+		t.Fatalf("success output must be empty (config prints interpolated secrets), got %q", out)
+	}
 	args := strings.Join(f.cmds[0].Args, " ")
-	if !strings.HasPrefix(args, "compose -p validate -f "+filepath.Join(dataDir, "tmp")) || !strings.HasSuffix(args, "config --quiet") {
+	if !strings.HasPrefix(args, "compose -p validate -f "+filepath.Join(dataDir, "tmp")) || !strings.HasSuffix(args, " config") ||
+		strings.Contains(args, "--project-directory") || strings.Contains(args, "--quiet") {
 		t.Fatalf("args %q", args)
 	}
 	if entries, _ := os.ReadDir(filepath.Join(dataDir, "tmp")); len(entries) != 0 {

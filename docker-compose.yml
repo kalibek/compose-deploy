@@ -1,9 +1,10 @@
 services:
   compose-deploy:
-    build:
-      context: .
-      dockerfile: api/Dockerfile
-    # image: compose-deploy:latest
+    image: kalibek/compose-deploy:latest
+    # To build locally instead of pulling, replace `image:` with:
+    # build:
+    #   context: .
+    #   dockerfile: api/Dockerfile
     # container_name: compose-deploy
     ports:
       - "3000:3000"
@@ -15,6 +16,7 @@ services:
       POLL_INTERVAL: ${POLL_INTERVAL:-60s}
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
       TRUST_PROXY: ${TRUST_PROXY:-false}
+      DOCKER_COMMAND: ${DOCKER_COMMAND:-docker}
     # Needed where SELinux is enforcing (Podman machine, Fedora/RHEL hosts) so the
     # container may use the engine socket; harmless elsewhere.
     security_opt:

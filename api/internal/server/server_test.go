@@ -100,7 +100,7 @@ func newEnv(t *testing.T) *env {
 	}
 	docker := &fakeDocker{}
 	wf := &fakeWorkflows{result: github.Result{State: github.StateSuccess}}
-	srv := New(Options{DB: d, Box: box, Auth: auth.New("pw", "secret", false), Deployer: dep, Runner: docker, Workflows: wf, DataDir: dir, Static: static})
+	srv := New(Options{DB: d, Box: box, Auth: auth.New("pw", "secret", false), Deployer: dep, Runner: docker, Workflows: wf, DataDir: dir, Static: static, DockerCommand: "docker"})
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
 	jar, _ := cookiejar.New(nil)

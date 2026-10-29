@@ -1,7 +1,9 @@
 // Package poller periodically checks each auto-deploy stack's branch head
 // with `git ls-remote` and enqueues a deploy when it differs from last_sha.
 // Stacks with the "workflow" trigger are only deployed once the new commit's
-// GitHub Actions workflow run(s) succeeded.
+// GitHub Actions workflow run(s) succeeded. A commit whose workflow failed is
+// re-checked with exponential backoff (a failed run may be re-run, but usually
+// isn't), so it doesn't spend a GitHub API request on every tick.
 package poller
 
 import (
@@ -28,6 +30,9 @@ type WorkflowChecker interface {
 	CommitState(ctx context.Context, repoURL, token, branch, sha, workflow string) (github.Result, error)
 }
 
+// maxBackoff caps the delay between workflow checks of a failed commit.
+const maxBackoff = 30 * time.Minute
+
 type Poller struct {
 	DB           *db.DB
 	Box          *crypto.Box
@@ -37,6 +42,17 @@ type Poller struct {
 	Interval     time.Duration
 	InitialDelay time.Duration
 	Logger       *slog.Logger
+	Now          func() time.Time // defaults to time.Now
+
+	// backoff holds, per stack, the failed commit being backed off. Only
+	// touched by Tick, which runs on a single goroutine.
+	backoff map[int64]backoff
+}
+
+type backoff struct {
+	sha   string
+	delay time.Duration
+	next  time.Time
 }
 
 // Run blocks until ctx is cancelled.
@@ -100,6 +116,7 @@ func (p *Poller) Tick(ctx context.Context, log *slog.Logger) {
 			continue
 		}
 		if sha == st.LastSHA {
+			delete(p.backoff, st.ID)
 			if st.WaitingSHA != "" { // e.g. branch reset to the deployed commit
 				p.setWaiting(ctx, log, st, "", "")
 			}
@@ -110,6 +127,9 @@ func (p *Poller) Tick(ctx context.Context, log *slog.Logger) {
 			p.Deployer.Enqueue(st.ID, false, db.Cause{By: db.ByPoll, Detail: "new commit on " + st.Branch})
 			continue
 		}
+		if b, ok := p.backoff[st.ID]; ok && b.sha == sha && p.now().Before(b.next) {
+			continue // workflow failed for this commit; not due for a re-check yet
+		}
 		cctx, cancel = context.WithTimeout(ctx, 60*time.Second)
 		res, err := p.Workflows.CommitState(cctx, st.RepoURL, token, st.Branch, sha, st.WorkflowName)
 		cancel()
@@ -118,6 +138,11 @@ func (p *Poller) Tick(ctx context.Context, log *slog.Logger) {
 			p.setWaiting(ctx, log, st, sha, err.Error())
 			continue
 		}
+		if res.State == github.StateFailed {
+			p.backOff(log, st, sha)
+		} else {
+			delete(p.backoff, st.ID) // pending again, e.g. the failed run was re-run
+		}
 		if res.State == github.StateSuccess {
 			log.Info("poller: workflow succeeded, deploying", "stack", st.Name, "sha", sha)
 			p.Deployer.EnqueueSHA(st.ID, sha, db.Cause{By: db.ByPoll, Detail: workflowDetail(st.WorkflowName)})
@@ -125,6 +150,32 @@ func (p *Poller) Tick(ctx context.Context, log *slog.Logger) {
 		}
 		p.setWaiting(ctx, log, st, sha, res.Detail)
 	}
+}
+
+// backOff schedules the next workflow check of a failed commit, doubling the
+// delay on each consecutive failure up to maxBackoff.
+func (p *Poller) backOff(log *slog.Logger, st *db.Stack, sha string) {
+	if p.backoff == nil {
+		p.backoff = map[int64]backoff{}
+	}
+	b, ok := p.backoff[st.ID]
+	if !ok || b.sha != sha {
+		b = backoff{sha: sha, delay: p.Interval}
+		if b.delay <= 0 {
+			b.delay = time.Minute
+		}
+	}
+	b.delay = min(2*b.delay, maxBackoff)
+	b.next = p.now().Add(b.delay)
+	p.backoff[st.ID] = b
+	log.Info("poller: workflow failed, backing off", "stack", st.Name, "sha", sha, "next_check_in", b.delay.String())
+}
+
+func (p *Poller) now() time.Time {
+	if p.Now != nil {
+		return p.Now()
+	}
+	return time.Now()
 }
 
 // workflowDetail describes a deploy caused by succeeded workflow run(s).

@@ -17,6 +17,7 @@ type Config struct {
 	PollInterval  time.Duration
 	CookieSecure  bool
 	TrustProxy    bool
+	DockerCommand string
 }
 
 // Load reads configuration from the process environment.
@@ -31,6 +32,7 @@ func LoadFrom(getenv func(string) string) (*Config, error) {
 		AppSecret:     getenv("APP_SECRET"),
 		DataDir:       getenv("DATA_DIR"),
 		ListenAddr:    getenv("LISTEN_ADDR"),
+		DockerCommand: getenv("DOCKER_COMMAND"),
 		PollInterval:  60 * time.Second,
 	}
 	if c.AdminPassword == "" {
@@ -41,6 +43,9 @@ func LoadFrom(getenv func(string) string) (*Config, error) {
 	}
 	if c.DataDir == "" {
 		c.DataDir = "/opt/compose-deploy"
+	}
+	if c.DockerCommand == "" {
+		c.DockerCommand = "docker"
 	}
 	if c.ListenAddr == "" {
 		c.ListenAddr = ":3000"

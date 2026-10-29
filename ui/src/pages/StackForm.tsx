@@ -11,7 +11,16 @@ import type {
 } from '../api/types'
 import EnvEditor from '../components/EnvEditor'
 import WebhookSetup from '../components/WebhookSetup'
-import { envForCreate, envForUpdate, newDraft, resolveDraft, rowsFromKeys, type EnvDraft } from '../lib/env'
+import {
+  envForCreate,
+  envForUpdate,
+  newDraft,
+  newRow,
+  resolveDraft,
+  rowsFromKeys,
+  type EnvDraft,
+  type EnvMode,
+} from '../lib/env'
 import { SLUG_RE } from '../lib/format'
 import { btnPrimary, btnSecondary, btnSecondarySm, card, code, errorBox, hint, input, label, link } from '../lib/ui'
 
@@ -37,11 +46,23 @@ interface FormState {
   env: EnvDraft
 }
 
+// GREETING is prefilled under "Environment variables" for new inline stacks and
+// shown on the page nginx serves.
+const sampleEnv = { key: 'GREETING', value: 'Hello from compose-deploy' }
+
 const composeTemplate = `services:
   web:
     image: nginx:alpine
     ports:
       - "8080:80"
+    environment:
+      # Shown on the page at http://<host>:8080
+      GREETING: \${GREETING:-Hello}
+    # $$ escapes compose interpolation, so the shell expands GREETING at start.
+    command:
+      - sh
+      - -c
+      - printf '<h1>%s</h1>\\n' "$$GREETING" > /usr/share/nginx/html/index.html && exec nginx -g 'daemon off;'
     restart: unless-stopped
 `
 
@@ -61,6 +82,15 @@ const emptyForm = (): FormState => ({
   workflow_name: '',
   env: newDraft([]),
 })
+
+const sampleDraft = (mode?: EnvMode) => newDraft([newRow(sampleEnv)], mode)
+
+const isEnvEmpty = (d: EnvDraft) => resolveDraft(d, noKeys).rows.every((r) => !r.key.trim())
+
+function isSampleEnv(d: EnvDraft): boolean {
+  const rows = resolveDraft(d, noKeys).rows.filter((r) => r.key.trim())
+  return rows.length === 1 && rows[0].key.trim() === sampleEnv.key && rows[0].value === sampleEnv.value
+}
 
 function formFromStack(s: Stack): FormState {
   return {
@@ -230,6 +260,17 @@ export default function StackForm({ mode }: Props) {
     setForm((f) => ({ ...f, [key]: value }))
   }
 
+  // Only on create: prefill the variable the sample compose file uses, and drop
+  // it again if the user goes back to git without changing it.
+  function setSource(source: StackSource) {
+    setForm((f) => {
+      let env = f.env
+      if (source === 'inline' && f.compose_content === composeTemplate && isEnvEmpty(env)) env = sampleDraft(env.mode)
+      if (source === 'git' && isSampleEnv(env)) env = newDraft([], env.mode)
+      return { ...f, source, env }
+    })
+  }
+
   const inline = form.source === 'inline'
   const contentChanged = !!stack && form.compose_content !== stack.compose_content
   // The server deploys an inline stack by itself when a changed file is saved with auto-deploy on.
@@ -373,14 +414,14 @@ export default function StackForm({ mode }: Props) {
           <div className="grid gap-2 sm:grid-cols-2">
             <SourceOption
               checked={!inline}
-              onSelect={() => set('source', 'git')}
+              onSelect={() => setSource('git')}
               title="Git repository"
               description="Deploy a compose file from a GitHub repository and follow a branch."
               disabled={busy}
             />
             <SourceOption
               checked={inline}
-              onSelect={() => set('source', 'inline')}
+              onSelect={() => setSource('inline')}
               title="Compose editor"
               description="Write the compose file here; saving it redeploys the stack."
               disabled={busy}

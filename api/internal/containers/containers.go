@@ -47,7 +47,8 @@ var ErrNotFound = errors.New("container not found")
 const psFormat = `{{.ID}}\t{{.Names}}\t{{.Image}}\t{{.State}}\t{{.Status}}\t{{.Ports}}\t{{.Label "com.docker.compose.service"}}\t{{.CreatedAt}}`
 
 type Client struct {
-	Runner runner.Runner
+	Runner        runner.Runner
+	DockerCommand string // container CLI binary, e.g. docker or podman
 }
 
 // List returns all containers (including stopped ones) of compose project
@@ -56,7 +57,7 @@ func (c *Client) List(ctx context.Context, project string) ([]Container, error) 
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	var out bytes.Buffer
-	err := c.Runner.Run(ctx, runner.Cmd{Name: "docker", Args: []string{
+	err := c.Runner.Run(ctx, runner.Cmd{Name: c.DockerCommand, Args: []string{
 		"ps", "--all", "--no-trunc",
 		"--filter", "label=com.docker.compose.project=" + project,
 		"--format", psFormat,
@@ -134,7 +135,7 @@ func (c *Client) Logs(ctx context.Context, id string, tail int, follow bool, out
 		args = append(args, "--follow")
 	}
 	args = append(args, id)
-	return c.Runner.Run(ctx, runner.Cmd{Name: "docker", Args: args}, out)
+	return c.Runner.Run(ctx, runner.Cmd{Name: c.DockerCommand, Args: args}, out)
 }
 
 // shellScript starts bash when the image has it, otherwise sh.
@@ -153,8 +154,8 @@ type Shell struct {
 
 // StartShell runs `docker exec -it <id> sh` attached to a new PTY of the given
 // size. The process is killed when ctx is done.
-func StartShell(ctx context.Context, id string, cols, rows uint16) (*Shell, error) {
-	cmd := exec.CommandContext(ctx, "docker", ShellArgs(id)...)
+func (c *Client) StartShell(ctx context.Context, id string, cols, rows uint16) (*Shell, error) {
+	cmd := exec.CommandContext(ctx, c.DockerCommand, ShellArgs(id)...)
 	cmd.Env = append(runner.BaseEnv(), "TERM=xterm-256color")
 	cmd.WaitDelay = 5 * time.Second
 	f, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: cols, Rows: rows})

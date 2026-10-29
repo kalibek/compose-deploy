@@ -36,7 +36,7 @@ func TestListParsesAndFilters(t *testing.T) {
 		"garbage line",
 		"",
 	}, "\n")}
-	c := &Client{Runner: f}
+	c := &Client{Runner: f, DockerCommand: "docker"}
 	list, err := c.List(context.Background(), "app")
 	if err != nil {
 		t.Fatal(err)
@@ -70,7 +70,7 @@ func TestListParsesAndFilters(t *testing.T) {
 
 func TestLogsArgs(t *testing.T) {
 	f := &fakeRunner{}
-	c := &Client{Runner: f}
+	c := &Client{Runner: f, DockerCommand: "docker"}
 	c.Logs(context.Background(), idA, 200, true, io.Discard)
 	c.Logs(context.Background(), idA, 50, false, io.Discard)
 	if want := []string{"logs", "--timestamps", "--tail", "200", "--follow", idA}; !reflect.DeepEqual(f.cmds[0].Args, want) {
@@ -106,7 +106,7 @@ func TestStartShellPTY(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	sh, err := StartShell(ctx, idA, 100, 30)
+	sh, err := (&Client{DockerCommand: "docker"}).StartShell(ctx, idA, 100, 30)
 	if err != nil {
 		t.Fatal(err)
 	}

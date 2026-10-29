@@ -67,6 +67,7 @@ func run(logger *slog.Logger) error {
 	}
 	dep := deployer.New(deployer.Options{
 		DB: database, Box: box, Runner: runner.Exec{}, DataDir: cfg.DataDir, Logger: logger,
+		DockerCommand: cfg.DockerCommand,
 	})
 
 	static, err := fs.Sub(web.Dist, "dist")
@@ -75,15 +76,16 @@ func run(logger *slog.Logger) error {
 	}
 	gh := github.New()
 	srv := server.New(server.Options{
-		DB:         database,
-		Box:        box,
-		Auth:       auth.New(cfg.AdminPassword, cfg.AppSecret, cfg.CookieSecure),
-		Deployer:   dep,
-		Workflows:  gh,
-		DataDir:    cfg.DataDir,
-		Static:     static,
-		Logger:     logger,
-		TrustProxy: cfg.TrustProxy,
+		DB:            database,
+		Box:           box,
+		Auth:          auth.New(cfg.AdminPassword, cfg.AppSecret, cfg.CookieSecure),
+		Deployer:      dep,
+		Workflows:     gh,
+		DataDir:       cfg.DataDir,
+		Static:        static,
+		Logger:        logger,
+		TrustProxy:    cfg.TrustProxy,
+		DockerCommand: cfg.DockerCommand,
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
